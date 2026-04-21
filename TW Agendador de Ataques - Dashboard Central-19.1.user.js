@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         TW Agendador de Ataques - Dashboard Central
 // @namespace    http://tampermonkey.net/
-// @version      19.1
-// @description  Agende ataques com precisão - Dashboard em aba separada
+// @version      20.0
+// @description  Agende ataques com precisão - Dashboard com TW UI Kit
 // @match        https://*.tribalwars.com.br/game.php*
+// @require      https://tribalwarstools.github.io/twscripts/tw-ui-kit.js
 // @grant        none
 // ==/UserScript==
 
@@ -28,30 +29,20 @@
     }
 
     // ============================================
-    // BOTÃO NA ABA DO JOGO
+    // BOTÃO NA ABA DO JOGO (com TW UI Kit)
     // ============================================
     function adicionarBotaoAbrirDashboard() {
-        const btn = document.createElement('div');
-        btn.innerHTML = '⚔️ AGENDADOR';
-        btn.style.cssText = `
-            position: fixed;
-            top: 130px;
-            right: 10px;
-            z-index: 999999;
-            padding: 8px 12px;
-            background: #0a0a0a;
-            color: #ff6600;
-            border: 1px solid #ff6600;
-            border-radius: 6px;
-            cursor: pointer;
-            font-family: monospace;
-            font-weight: bold;
-            font-size: 11px;
-        `;
-        btn.onclick = () => {
+        // Aguarda TWUI estar disponível
+        if (typeof TWUI === 'undefined') {
+            setTimeout(adicionarBotaoAbrirDashboard, 100);
+            return;
+        }
+
+        const ui = TWUI.create('agendador-float');
+        ui.injectStyles();
+        ui.floatBtn('⚔️ AGENDADOR', () => {
             window.open(window.location.href.split('?')[0] + '?' + DASHBOARD_PARAM, 'TWAgendador');
-        };
-        document.body.appendChild(btn);
+        }, { top: 130, right: 10 });
     }
 
     // ============================================
@@ -65,6 +56,16 @@
     // DASHBOARD PRINCIPAL
     // ============================================
     async function renderizarDashboard() {
+
+        // Aguarda TWUI estar disponível
+        if (typeof TWUI === 'undefined') {
+            setTimeout(renderizarDashboard, 100);
+            return;
+        }
+
+        // Inicializa UI Kit com prefixo único
+        const ui = TWUI.create('agendador');
+        ui.injectStyles();
 
         // ============================================
         // CONSTANTES
@@ -104,6 +105,9 @@
         const troopCache   = new Map();
         let lastCacheClear = Date.now();
 
+        // Referência para o log do UI Kit
+        let uiLog = null;
+
         // ============================================
         // SINCRONIZAÇÃO DE HORÁRIO DO SERVIDOR
         // ============================================
@@ -135,8 +139,8 @@
         }
 
         function preencherDataHoraAutomatica() {
-            const dataInput = document.getElementById('data');
-            const horaInput = document.getElementById('hora');
+            const dataInput = document.getElementById('agendador-data');
+            const horaInput = document.getElementById('agendador-hora');
             if (!dataInput || !horaInput) return;
             const now = getServerDate();
             const pad = n => String(n).padStart(2, '0');
@@ -152,6 +156,17 @@
 
         function number_format(n, sep) {
             return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, sep);
+        }
+
+        // ============================================
+        // LOG (usando UI Kit)
+        // ============================================
+        function adicionarLog(msg, tipo = 'info') {
+            if (uiLog) {
+                uiLog(msg, tipo);
+            } else {
+                console.log(`[TWS][${tipo}] ${msg}`);
+            }
         }
 
         // ============================================
@@ -257,7 +272,7 @@
 
         function hasUserFilledTroops() {
             for (const t of TROOP_IDS) {
-                const inp = document.getElementById(t);
+                const inp = document.getElementById(`agendador-${t}`);
                 if (inp && parseInt(inp.value) > 0) return true;
             }
             return false;
@@ -275,21 +290,18 @@
             let importados = 0, ignorados = 0;
 
             for (const linha of linhas) {
-                // Extrai coordenadas
                 const coords = linha.match(/(\d{1,4}\|\d{1,4})/g);
                 if (!coords || coords.length < 2) continue;
 
                 const origem = coords[0];
                 const alvo = coords[1];
 
-                // Extrai data/hora
                 const dataMatch = linha.match(/(\d{2}\/\d{2}\/\d{4}\s\d{2}:\d{2}(?::\d{2})?)/);
                 if (!dataMatch) continue;
 
                 let datahora = dataMatch[1];
                 if (datahora.split(':').length === 2) datahora += ':00';
 
-                // Extrai tropas da URL
                 const urlMatch = linha.match(/\[url=(.*?)\]/);
                 const tropas = {};
 
@@ -301,7 +313,6 @@
                     });
                 }
 
-                // Verifica se já existe
                 const ataques = carregarAtaques();
                 const existe = ataques.some(a => a.origem === origem && a.alvo === alvo && a.datahora === datahora);
 
@@ -310,7 +321,6 @@
                     continue;
                 }
 
-                // Se não tem tropas na URL, usa AutoFill
                 const temTropas = Object.values(tropas).some(v => v > 0);
                 const autoFill = !temTropas;
 
@@ -333,11 +343,11 @@
             }
 
             if (importados > 0) {
-                adicionarLog(`✅ ${importados} ataques importados!${ignorados > 0 ? ` (${ignorados} ignorados)` : ''}`, 'ok');
+                adicionarLog(`✅ ${importados} ataques importados!${ignorados > 0 ? ` (${ignorados} ignorados)` : ''}`, 'success');
             } else if (ignorados > 0) {
                 adicionarLog(`ℹ️ ${ignorados} ataques já existentes.`, 'info');
             } else {
-                adicionarLog('❌ Nenhum ataque encontrado!', 'err');
+                adicionarLog('❌ Nenhum ataque encontrado!', 'error');
             }
         }
 
@@ -470,15 +480,15 @@
         async function enviarMultiplosDoAtaque(index, quantidade) {
             const ataques = carregarAtaques();
             const ataqueOriginal = ataques[index];
-            if (!ataqueOriginal) { adicionarLog('❌ Ataque não encontrado!', 'err'); return; }
+            if (!ataqueOriginal) { adicionarLog('❌ Ataque não encontrado!', 'error'); return; }
 
             const hasTroops = TROOP_IDS.some(t => (ataqueOriginal[t] || 0) > 0);
             if (!hasTroops && !ataqueOriginal.autoFill) {
-                adicionarLog('❌ Este ataque não possui tropas configuradas!', 'err');
+                adicionarLog('❌ Este ataque não possui tropas configuradas!', 'error');
                 return;
             }
 
-            adicionarLog(`🚀 Disparando ${quantidade} ataques simultâneos: ${ataqueOriginal.origem} → ${ataqueOriginal.alvo}`, 'warn');
+            adicionarLog(`🚀 Disparando ${quantidade} ataques simultâneos: ${ataqueOriginal.origem} → ${ataqueOriginal.alvo}`, 'warning');
 
             const promises = Array.from({ length: quantidade }, (_, i) =>
                 executeAttack(ataqueOriginal)
@@ -492,16 +502,16 @@
 
             results.forEach(r => {
                 if (r.sucesso) {
-                    adicionarLog(`  ✅ Ataque ${r.i}/${quantidade} enviado!`, 'ok');
+                    adicionarLog(`  ✅ Ataque ${r.i}/${quantidade} enviado!`, 'success');
                 } else {
-                    adicionarLog(`  ❌ Ataque ${r.i}/${quantidade} falhou: ${r.error || 'motivo desconhecido'}`, 'err');
+                    adicionarLog(`  ❌ Ataque ${r.i}/${quantidade} falhou: ${r.error || 'motivo desconhecido'}`, 'error');
                 }
             });
 
             if (sucessos === quantidade) {
-                adicionarLog(`🎯 NT${quantidade} completo! ${sucessos}/${quantidade} enviados.`, 'ok');
+                adicionarLog(`🎯 NT${quantidade} completo! ${sucessos}/${quantidade} enviados.`, 'success');
             } else {
-                adicionarLog(`📊 NT${quantidade}: ${sucessos} sucessos, ${falhas} falhas.`, 'warn');
+                adicionarLog(`📊 NT${quantidade}: ${sucessos} sucessos, ${falhas} falhas.`, 'warning');
             }
         }
 
@@ -520,48 +530,48 @@
         function saveCurrentAsTemplate(name) {
             const tropas = {};
             TROOP_IDS.forEach(t => {
-                const inp = document.getElementById(t);
+                const inp = document.getElementById(`agendador-${t}`);
                 if (inp) tropas[t] = parseInt(inp.value) || 0;
             });
             troopTemplates.push({ id: Date.now(), name, tropas });
             saveTemplates();
             renderTemplateList();
-            adicionarLog(`✅ Template "${name}" salvo!`, 'ok');
+            adicionarLog(`✅ Template "${name}" salvo!`, 'success');
         }
 
         function loadTemplate(id) {
             const tpl = troopTemplates.find(t => t.id === id);
             if (!tpl) return;
             TROOP_IDS.forEach(t => {
-                const inp = document.getElementById(t);
+                const inp = document.getElementById(`agendador-${t}`);
                 if (inp && tpl.tropas[t] !== undefined) inp.value = tpl.tropas[t];
             });
-            adicionarLog(`✅ Template "${tpl.name}" carregado!`, 'ok');
+            adicionarLog(`✅ Template "${tpl.name}" carregado!`, 'success');
         }
 
         function deleteTemplate(id) {
             troopTemplates = troopTemplates.filter(t => t.id !== id);
             saveTemplates();
             renderTemplateList();
-            adicionarLog('✅ Template excluído!', 'ok');
+            adicionarLog('✅ Template excluído!', 'success');
         }
 
         function renderTemplateList() {
-            const c = document.getElementById('tws-template-list');
+            const c = document.getElementById('agendador-template-list');
             if (!c) return;
             if (!troopTemplates.length) {
-                c.innerHTML = '<div style="color:#666;text-align:center;padding:8px;font-size:11px;">Nenhum template salvo</div>';
+                c.innerHTML = '<div style="color:#8b949e;text-align:center;padding:8px;font-size:11px;">Nenhum template salvo</div>';
                 return;
             }
             c.innerHTML = troopTemplates.map(t => `
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:5px;background:#0a0a0a;border:1px solid #333;margin-bottom:4px;border-radius:4px;">
-                    <span style="font-size:11px;color:#ff6600;cursor:pointer;" onclick="window.loadTemplate(${t.id})">📋 ${t.name}</span>
-                    <button onclick="window.deleteTemplate(${t.id})" style="background:#990000;color:#fff;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px;">✖</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:5px;background:#0d1117;border:1px solid #21262d;margin-bottom:4px;border-radius:4px;">
+                    <span style="font-size:11px;color:#00d97e;cursor:pointer;" onclick="window.agendadorLoadTemplate(${t.id})">📋 ${t.name}</span>
+                    <button onclick="window.agendadorDeleteTemplate(${t.id})" style="background:#f8514922;color:#f85149;border:1px solid #f8514933;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:10px;">✖</button>
                 </div>`).join('');
         }
 
-        window.loadTemplate   = loadTemplate;
-        window.deleteTemplate = deleteTemplate;
+        window.agendadorLoadTemplate = loadTemplate;
+        window.agendadorDeleteTemplate = deleteTemplate;
 
         // ============================================
         // ARMAZENAMENTO
@@ -579,17 +589,17 @@
 
         function salvarDadosFormulario() {
             const dados = {
-                origem: document.getElementById('origem')?.value || '',
-                alvo:   document.getElementById('alvo')?.value   || '',
-                data:   document.getElementById('data')?.value   || '',
-                hora:   document.getElementById('hora')?.value   || '00:00:00'
+                origem: document.getElementById('agendador-origem')?.value || '',
+                alvo:   document.getElementById('agendador-alvo')?.value   || '',
+                data:   document.getElementById('agendador-data')?.value   || '',
+                hora:   document.getElementById('agendador-hora')?.value   || '00:00:00'
             };
             TROOP_IDS.forEach(t => {
-                const inp = document.getElementById(t);
+                const inp = document.getElementById(`agendador-${t}`);
                 if (inp) dados[t] = inp.value;
             });
             localStorage.setItem(STORAGE_KEYS.FORM_DATA, JSON.stringify(dados));
-            adicionarLog('✅ Dados do formulário salvos!', 'ok');
+            adicionarLog('✅ Dados do formulário salvos!', 'success');
         }
 
         function carregarDadosFormulario() {
@@ -597,13 +607,13 @@
             if (!d) return;
             try {
                 const f = JSON.parse(d);
-                if (f.origem) document.getElementById('origem').value = f.origem;
-                if (f.alvo)   document.getElementById('alvo').value   = f.alvo;
-                if (f.data)   document.getElementById('data').value   = f.data;
-                if (f.hora)   document.getElementById('hora').value   = f.hora;
+                if (f.origem) document.getElementById('agendador-origem').value = f.origem;
+                if (f.alvo)   document.getElementById('agendador-alvo').value   = f.alvo;
+                if (f.data)   document.getElementById('agendador-data').value   = f.data;
+                if (f.hora)   document.getElementById('agendador-hora').value   = f.hora;
                 TROOP_IDS.forEach(t => {
                     if (f[t] !== undefined) {
-                        const inp = document.getElementById(t);
+                        const inp = document.getElementById(`agendador-${t}`);
                         if (inp) inp.value = f[t];
                     }
                 });
@@ -654,7 +664,7 @@
                                 sucesso
                                     ? `✅ Ataque ${ataqueRef.origem} → ${ataqueRef.alvo} enviado!`
                                     : `❌ Falha no ataque ${ataqueRef.origem} → ${ataqueRef.alvo}`,
-                                sucesso ? 'ok' : 'err'
+                                sucesso ? 'success' : 'error'
                             );
                         } catch (err) {
                             const atual = carregarAtaques();
@@ -666,7 +676,7 @@
                                 atual[idx].erro    = err.message;
                                 salvarAtaques(atual);
                             }
-                            adicionarLog(`❌ Erro: ${err.message}`, 'err');
+                            adicionarLog(`❌ Erro: ${err.message}`, 'error');
                         } finally {
                             executando.delete(ataqueRef.id);
                         }
@@ -679,24 +689,24 @@
         // AGENDAR ATAQUE
         // ============================================
         async function agendarAtaque() {
-            const origem = document.getElementById('origem').value.trim();
-            const alvo   = document.getElementById('alvo').value.trim();
-            const data   = document.getElementById('data').value.trim();
-            const hora   = document.getElementById('hora').value.trim();
+            const origem = document.getElementById('agendador-origem').value.trim();
+            const alvo   = document.getElementById('agendador-alvo').value.trim();
+            const data   = document.getElementById('agendador-data').value.trim();
+            const hora   = document.getElementById('agendador-hora').value.trim();
 
             if (!origem || !alvo || !data || !hora) {
-                adicionarLog('❌ Preencha todos os campos!', 'err');
+                adicionarLog('❌ Preencha todos os campos!', 'error');
                 return;
             }
 
             const datahora = `${data} ${hora}`;
 
             if (!/^\d{1,4}\|\d{1,4}$/.test(origem) || !/^\d{1,4}\|\d{1,4}$/.test(alvo)) {
-                adicionarLog('❌ Coordenadas inválidas! Use: 500|500', 'err');
+                adicionarLog('❌ Coordenadas inválidas! Use: 500|500', 'error');
                 return;
             }
             if (!/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/.test(datahora)) {
-                adicionarLog('❌ Data/hora inválida! Use: DD/MM/AAAA HH:MM:SS', 'err');
+                adicionarLog('❌ Data/hora inválida! Use: DD/MM/AAAA HH:MM:SS', 'error');
                 return;
             }
 
@@ -704,7 +714,7 @@
             const [horaNum, minutoNum, segundoNum] = hora.split(':');
             const dataAgendada = new Date(ano, mes - 1, dia, horaNum, minutoNum, segundoNum);
             if (dataAgendada <= getServerDate()) {
-                adicionarLog('❌ A data/hora deve ser futura!', 'err');
+                adicionarLog('❌ A data/hora deve ser futura!', 'error');
                 return;
             }
 
@@ -716,19 +726,19 @@
             if (!userFilled) {
                 const villageId = _villageMap[origem];
                 if (!villageId) {
-                    adicionarLog('❌ Vila origem não encontrada no mapa!', 'err');
+                    adicionarLog('❌ Vila origem não encontrada no mapa!', 'error');
                     return;
                 }
 
                 const allTroops = await getAllAvailableTroops(villageId);
                 if (!allTroops) {
-                    adicionarLog('❌ Não foi possível verificar as tropas disponíveis!', 'err');
+                    adicionarLog('❌ Não foi possível verificar as tropas disponíveis!', 'error');
                     return;
                 }
 
                 const hasAnyTroops = Object.values(allTroops).some(v => v > 0);
                 if (!hasAnyTroops) {
-                    adicionarLog('❌ Esta vila não possui tropas disponíveis!', 'err');
+                    adicionarLog('❌ Esta vila não possui tropas disponíveis!', 'error');
                     return;
                 }
 
@@ -736,13 +746,13 @@
                 adicionarLog(`🤖 AutoFill ativado: tropas serão buscadas no momento do envio`, 'info');
             } else {
                 TROOP_IDS.forEach(t => {
-                    const inp = document.getElementById(t);
+                    const inp = document.getElementById(`agendador-${t}`);
                     tropas[t] = parseInt(inp?.value || 0);
                 });
 
                 const temTropas = Object.values(tropas).some(v => v > 0);
                 if (!temTropas) {
-                    adicionarLog('❌ Selecione pelo menos um tipo de tropa ou deixe vazio para AutoFill!', 'err');
+                    adicionarLog('❌ Selecione pelo menos um tipo de tropa ou deixe vazio para AutoFill!', 'error');
                     return;
                 }
             }
@@ -762,20 +772,20 @@
             const ataques = carregarAtaques();
             ataques.push(novoAtaque);
             salvarAtaques(ataques);
-            adicionarLog(`✅ Ataque agendado para ${datahora}${autoFill ? ' [AutoFill]' : ''}`, 'ok');
+            adicionarLog(`✅ Ataque agendado para ${datahora}${autoFill ? ' [AutoFill]' : ''}`, 'success');
         }
 
         // ============================================
-        // RENDERIZAR LISTA
+        // RENDERIZAR LISTA (com UI Kit)
         // ============================================
         function renderizarLista() {
-            const container = document.getElementById('listaAtaques');
+            const container = document.getElementById('agendador-lista-ataques');
             if (!container) return;
             const ataques = carregarAtaques();
             const agora   = getServerTimestampSeconds();
 
             if (!ataques.length) {
-                container.innerHTML = '<div style="text-align:center;padding:20px;color:#888;">Nenhum ataque agendado</div>';
+                container.innerHTML = ui.emptyRowHTML('📭', 'Nenhum ataque agendado', 'Clique em "Agendar" para criar um novo ataque', 5);
                 return;
             }
 
@@ -786,28 +796,42 @@
                 const dataAgendada = new Date(ano, mes - 1, dia, hora, min, seg).getTime() / 1000;
                 const isPast = !ataque.enviado && dataAgendada < agora;
 
-                const corBorda  = ataque.enviado ? (ataque.sucesso ? '#22a55a' : '#e24b4a') : '#ff6600';
                 const autoFillBadge = ataque.autoFill
-                    ? '<span style="background:#ff6600;color:#000;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:6px;">🤖 AutoFill</span>'
+                    ? `<span class="agendador-badge agendador-badge-blue" style="margin-left:6px;">🤖 AutoFill</span>`
                     : '';
-                const statusText = ataque.enviado
-                    ? (ataque.sucesso ? '✅ Enviado com sucesso' : `❌ Falhou: ${ataque.erro || 'motivo desconhecido'}`)
-                    : (ataque.travado ? '⏳ Enviando...'
-                        : (isPast ? '⏰ Atrasado — clique em Enviar agora'
-                            : (ataque.autoFill ? '🤖 Aguardando (usará tropas atuais no envio)' : '⏰ Agendado')));
 
-                const corStatus = ataque.enviado
-                    ? (ataque.sucesso ? '#22a55a' : '#e24b4a')
-                    : (isPast ? '#ff8800' : '#aaa');
+                let statusText = '';
+                let statusClass = '';
+                if (ataque.enviado) {
+                    if (ataque.sucesso) {
+                        statusText = '✅ Enviado com sucesso';
+                        statusClass = 'agendador-badge-green';
+                    } else {
+                        statusText = `❌ Falhou: ${ataque.erro || 'motivo desconhecido'}`;
+                        statusClass = 'agendador-badge-red';
+                    }
+                } else if (ataque.travado) {
+                    statusText = '⏳ Enviando...';
+                    statusClass = 'agendador-badge-blue';
+                } else if (isPast) {
+                    statusText = '⏰ Atrasado — clique em Enviar agora';
+                    statusClass = 'agendador-badge-yellow';
+                } else if (ataque.autoFill) {
+                    statusText = '🤖 Aguardando (usará tropas atuais no envio)';
+                    statusClass = 'agendador-badge-blue';
+                } else {
+                    statusText = '⏰ Agendado';
+                    statusClass = 'agendador-badge-green';
+                }
 
                 let tropasPreview = '';
                 if (!ataque.autoFill) {
                     const list = TROOP_IDS.filter(t => (ataque[t] || 0) > 0);
                     if (list.length) {
-                        tropasPreview = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">` +
+                        tropasPreview = `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;">` +
                             list.map(t => `
-                                <span style="background:#0a0a0a;border:1px solid #333;padding:2px 5px;border-radius:3px;font-size:10px;display:inline-flex;align-items:center;gap:3px;">
-                                    <img src="${TROOP_ICONS[t]}" style="width:13px;height:13px;" title="${TROOP_NAMES[t]}">
+                                <span style="background:#0d1117;border:1px solid #21262d;padding:2px 6px;border-radius:4px;font-size:10px;display:inline-flex;align-items:center;gap:4px;">
+                                    <img src="${TROOP_ICONS[t]}" style="width:14px;height:14px;" title="${TROOP_NAMES[t]}">
                                     ${number_format(ataque[t], '.')}
                                 </span>`).join('') +
                             `</div>`;
@@ -815,23 +839,30 @@
                 }
 
                 return `
-                    <div style="background:#1a1a1a;border-left:3px solid ${corBorda};border-radius:6px;padding:8px;margin-bottom:8px;">
-                        <div style="display:flex;justify-content:space-between;align-items:center;">
-                            <div style="font-size:12px;"><strong style="color:#ff6600;">${ataque.origem}</strong> → <strong style="color:#ff6600;">${ataque.alvo}</strong>${autoFillBadge}</div>
-                            <div style="font-size:10px;color:#888;">${ataque.datahora}</div>
+                    <div style="background:#0d1117;border-left:3px solid ${ataque.enviado ? (ataque.sucesso ? '#00d97e' : '#f85149') : '#d29922'};border-radius:6px;padding:10px;margin-bottom:10px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+                            <div style="font-size:13px;">
+                                <strong style="color:#00d97e;">${ataque.origem}</strong>
+                                <span style="color:#8b949e;">→</span>
+                                <strong style="color:#00d97e;">${ataque.alvo}</strong>
+                                ${autoFillBadge}
+                            </div>
+                            <div style="font-size:11px;color:#8b949e;font-family:monospace;">${ataque.datahora}</div>
                         </div>
                         ${tropasPreview}
-                        <div style="font-size:10px;margin-top:4px;color:${corStatus};">${statusText}</div>
-                        <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap;">
+                        <div style="margin-top:6px;">
+                            <span class="${statusClass}" style="font-size:10px;padding:2px 6px;">${statusText}</span>
+                        </div>
+                        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
                             ${!ataque.enviado
-                                ? `<button onclick="window.enviarImediato(${index})" style="background:#ff6600;color:#000;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;font-weight:bold;">▶ Enviar agora</button>`
+                                ? `<button onclick="window.agendadorEnviarImediato(${index})" class="agendador-btn agendador-btn-warning" style="padding:4px 10px;font-size:10px;">▶ Enviar agora</button>`
                                 : ''}
                             ${ataque.enviado && ataque.sucesso
-                                ? `<button onclick="window.repetirAtaque(${index})" style="background:#0066cc;color:#fff;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;">🔄 Repetir</button>`
+                                ? `<button onclick="window.agendadorRepetirAtaque(${index})" class="agendador-btn agendador-btn-primary" style="padding:4px 10px;font-size:10px;">🔄 Repetir</button>`
                                 : ''}
-                            <button onclick="window.enviarNT(${index},4)" style="background:#b87333;color:#fff;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;font-weight:bold;" title="4 ataques simultâneos">⚡ NT4</button>
-                            <button onclick="window.enviarNT(${index},5)" style="background:#a0522d;color:#fff;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;font-weight:bold;" title="5 ataques simultâneos">🔥 NT5</button>
-                            <button onclick="window.removerAtaque(${index})" style="background:#990000;color:#fff;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:10px;">🗑️ Remover</button>
+                            <button onclick="window.agendadorEnviarNT(${index},4)" class="agendador-btn agendador-btn-primary" style="padding:4px 10px;font-size:10px;background:#b87333;">⚡ NT4</button>
+                            <button onclick="window.agendadorEnviarNT(${index},5)" class="agendador-btn agendador-btn-primary" style="padding:4px 10px;font-size:10px;background:#a0522d;">🔥 NT5</button>
+                            <button onclick="window.agendadorRemoverAtaque(${index})" class="agendador-btn agendador-btn-danger" style="padding:4px 10px;font-size:10px;">🗑️ Remover</button>
                         </div>
                     </div>
                 `;
@@ -839,9 +870,9 @@
         }
 
         // ============================================
-        // AÇÕES DA LISTA
+        // AÇÕES DA LISTA (globais)
         // ============================================
-        window.enviarImediato = async (index) => {
+        window.agendadorEnviarImediato = async (index) => {
             const ataques = carregarAtaques();
             const ataque  = ataques[index];
             if (!ataque) return;
@@ -852,54 +883,61 @@
                 ataques[index].sucesso   = sucesso;
                 ataques[index].dataEnvio = new Date().toISOString();
                 salvarAtaques(ataques);
-                adicionarLog(sucesso ? '✅ Ataque enviado!' : '❌ Falha no envio', sucesso ? 'ok' : 'err');
+                adicionarLog(sucesso ? '✅ Ataque enviado!' : '❌ Falha no envio', sucesso ? 'success' : 'error');
             } catch (err) {
-                adicionarLog(`❌ Erro: ${err.message}`, 'err');
+                adicionarLog(`❌ Erro: ${err.message}`, 'error');
             }
         };
 
-        window.repetirAtaque = async (index) => {
+        window.agendadorRepetirAtaque = async (index) => {
             const ataques       = carregarAtaques();
             const ataqueOriginal = ataques[index];
             if (!ataqueOriginal) return;
             adicionarLog(`🔄 Repetindo: ${ataqueOriginal.origem} → ${ataqueOriginal.alvo}`, 'info');
             try {
                 const sucesso = await executeAttack(ataqueOriginal);
-                adicionarLog(sucesso ? '✅ Ataque repetido!' : '❌ Falha', sucesso ? 'ok' : 'err');
+                adicionarLog(sucesso ? '✅ Ataque repetido!' : '❌ Falha', sucesso ? 'success' : 'error');
             } catch (err) {
-                adicionarLog(`❌ Erro: ${err.message}`, 'err');
+                adicionarLog(`❌ Erro: ${err.message}`, 'error');
             }
         };
 
-        window.enviarNT = (index, quantidade) => {
+        window.agendadorEnviarNT = (index, quantidade) => {
             enviarMultiplosDoAtaque(index, quantidade);
         };
 
-        window.removerAtaque = (index) => {
+        window.agendadorRemoverAtaque = (index) => {
             const ataques = carregarAtaques();
             const a = ataques[index];
             ataques.splice(index, 1);
             salvarAtaques(ataques);
-            adicionarLog(`✅ Ataque ${a?.origem} → ${a?.alvo} removido!`, 'ok');
+            adicionarLog(`✅ Ataque ${a?.origem} → ${a?.alvo} removido!`, 'success');
         };
 
         function limparTudo() {
-            salvarAtaques([]);
-            adicionarLog('🗑️ Todos os ataques removidos!', 'warn');
+            if (confirm('⚠️ Tem certeza que deseja remover TODOS os ataques?')) {
+                salvarAtaques([]);
+                adicionarLog('🗑️ Todos os ataques removidos!', 'warning');
+            }
         }
 
         function limparConcluidos() {
             const ataques      = carregarAtaques();
             const naoConcluidos = ataques.filter(a => !a.enviado);
+            const removidos = ataques.length - naoConcluidos.length;
+            if (removidos === 0) {
+                adicionarLog('ℹ️ Nenhum ataque concluído para remover.', 'info');
+                return;
+            }
             salvarAtaques(naoConcluidos);
-            adicionarLog(`🧹 Removidos ${ataques.length - naoConcluidos.length} ataques concluídos`, 'ok');
+            adicionarLog(`🧹 Removidos ${removidos} ataques concluídos`, 'success');
         }
 
         function destravarAtaques() {
             const ataques = carregarAtaques();
             let n = 0;
             ataques.forEach(a => { if (a.travado && !a.enviado) { a.travado = false; n++; } });
-            if (n > 0) { salvarAtaques(ataques); adicionarLog(`✅ ${n} ataques destravados!`, 'ok'); }
+            if (n > 0) { salvarAtaques(ataques); adicionarLog(`✅ ${n} ataques destravados!`, 'success'); }
             else        { adicionarLog('ℹ️ Nenhum ataque travado encontrado.', 'info'); }
         }
 
@@ -908,15 +946,19 @@
         // ============================================
         function atualizarEstatisticas() {
             const ataques = carregarAtaques();
-            const el = id => document.getElementById(id);
-            if (el('totalAtaques'))    el('totalAtaques').textContent    = ataques.length;
-            if (el('pendentesCount'))  el('pendentesCount').textContent  = ataques.filter(a => !a.enviado).length;
-            if (el('sucessosCount'))   el('sucessosCount').textContent   = ataques.filter(a => a.enviado && a.sucesso).length;
-            if (el('falhasCount'))     el('falhasCount').textContent     = ataques.filter(a => a.enviado && !a.sucesso).length;
+            const total = ataques.length;
+            const pendentes = ataques.filter(a => !a.enviado).length;
+            const sucessos = ataques.filter(a => a.enviado && a.sucesso).length;
+            const falhas = ataques.filter(a => a.enviado && !a.sucesso).length;
+
+            ui.updateStat('agendador-total', total);
+            ui.updateStat('agendador-pendentes', pendentes);
+            ui.updateStat('agendador-sucessos', sucessos);
+            ui.updateStat('agendador-falhas', falhas);
         }
 
         function atualizarSelectAldeias() {
-            const select = document.getElementById('origemSelect');
+            const select = document.getElementById('agendador-origem-select');
             if (!select) return;
             if (_myVillages.length === 0) {
                 select.innerHTML = '<option value="">Nenhuma aldeia encontrada</option>';
@@ -932,9 +974,256 @@
         }
 
         // ============================================
-        // LOG
+        // CONSTRUÇÃO DO DASHBOARD COM UI KIT
         // ============================================
-        let adicionarLog = (msg, tipo) => console.log(`[TWS][${tipo}] ${msg}`);
+
+        // 1. Renderiza o app
+        ui.renderApp();
+
+        // 2. Header
+        ui.header('⚔️ Agendador de Ataques', 'v20.0', '<span style="font-size:10px;color:#8b949e;">Dashboard Central</span>');
+
+        // 3. Stats Strip
+        ui.statsStrip([
+            { title: '📊 Total de Ataques', items: [{ icon: '🎯', id: 'agendador-total' }] },
+            { title: '⏳ Pendentes', items: [{ icon: '📋', id: 'agendador-pendentes' }] },
+            { title: '✅ Sucessos', items: [{ icon: '🏆', id: 'agendador-sucessos' }] },
+            { title: '❌ Falhas', items: [{ icon: '⚠️', id: 'agendador-falhas' }] }
+        ]);
+
+        // 4. Progress Bar
+        ui.progressBar();
+
+        // 5. Toolbar
+        ui.toolbar(
+            `<button id="agendador-agendar-btn" class="agendador-btn agendador-btn-primary">📅 Agendar</button>
+             <button id="agendador-usar-todas-btn" class="agendador-btn agendador-btn-warning">🎯 Usar TODAS Tropas</button>
+             <button id="agendador-importar-btn" class="agendador-btn agendador-btn-primary">📋 Importar BBCode</button>
+             <button id="agendador-salvar-dados-btn" class="agendador-btn agendador-btn-primary">💾 Salvar</button>
+             <button id="agendador-limpar-concluidos-btn" class="agendador-btn agendador-btn-primary">🧹 Limpar Concluídos</button>
+             <button id="agendador-destravar-btn" class="agendador-btn agendador-btn-primary">🔓 Destravar</button>
+             <button id="agendador-limpar-tudo-btn" class="agendador-btn agendador-btn-danger">🗑️ Limpar Tudo</button>`,
+            `<span id="agendador-status" style="font-size:10px;color:#8b949e;"></span>`
+        );
+
+        // 6. Main Layout com conteúdo personalizado
+        const contentHTML = `
+            <div style="padding:0 20px 20px 20px;">
+                <!-- Formulário -->
+                <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:16px;margin-bottom:20px;">
+                    <div style="color:#00d97e;font-weight:bold;margin-bottom:12px;font-size:12px;">📝 Novo Ataque</div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <div>
+                            <label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px;">🏠 Vila Origem</label>
+                            <select id="agendador-origem-select" style="width:100%;padding:6px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:6px;margin-bottom:5px;"></select>
+                            <input type="text" id="agendador-origem" placeholder="Ou digite coordenadas (ex: 500|500)"
+                                style="width:100%;padding:6px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:6px;box-sizing:border-box;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px;">🎯 Vila Alvo</label>
+                            <input type="text" id="agendador-alvo" placeholder="Ex: 510|510"
+                                style="width:100%;padding:6px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:6px;box-sizing:border-box;">
+                        </div>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                        <div>
+                            <label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px;">📅 Data</label>
+                            <input type="text" id="agendador-data" placeholder="DD/MM/AAAA"
+                                style="width:100%;padding:6px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:6px;box-sizing:border-box;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px;">⏰ Hora</label>
+                            <div style="display:flex;gap:6px;">
+                                <input type="text" id="agendador-hora" value="00:00:00"
+                                    style="flex:1;padding:6px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:6px;">
+                                <button id="agendador-btn-agora" style="padding:4px 8px;background:#388bfd22;color:#388bfd;border:1px solid #388bfd33;border-radius:4px;cursor:pointer;font-size:10px;">Agora</button>
+                                <button id="agendador-btn-mais1h" style="padding:4px 8px;background:#00d97e22;color:#00d97e;border:1px solid #00d97e33;border-radius:4px;cursor:pointer;font-size:10px;">+1h</button>
+                                <button id="agendador-btn-mais30m" style="padding:4px 8px;background:#00d97e22;color:#00d97e;border:1px solid #00d97e33;border-radius:4px;cursor:pointer;font-size:10px;">+30m</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom:12px;">
+                        <label style="display:block;font-size:10px;color:#8b949e;margin-bottom:4px;">⚔️ Tropas <span style="color:#666;">(deixe vazio para AutoFill)</span></label>
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;background:#080c10;padding:8px;border-radius:6px;max-height:200px;overflow-y:auto;">
+                            ${TROOP_LIST.map(t => `
+                                <div style="display:flex;justify-content:space-between;align-items:center;background:#0d1117;padding:4px 8px;border-radius:4px;border:1px solid #21262d;">
+                                    <span style="font-size:11px;color:#00d97e;display:flex;align-items:center;gap:5px;">
+                                        <img src="${t.icon}" style="width:16px;height:16px;"> ${t.nome}
+                                    </span>
+                                    <input type="number" id="agendador-${t.id}" value="0" min="0" step="1"
+                                        style="width:65px;padding:3px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:4px;text-align:center;">
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Templates -->
+                    <div style="margin-bottom:12px;background:#080c10;border:1px solid #21262d;border-radius:6px;padding:10px;">
+                        <div style="color:#00d97e;font-size:11px;font-weight:bold;margin-bottom:8px;">💾 Templates de Tropas</div>
+                        <div id="agendador-template-list" style="max-height:120px;overflow-y:auto;margin-bottom:8px;"></div>
+                        <div style="display:flex;gap:6px;">
+                            <input type="text" id="agendador-template-name" placeholder="Nome do template"
+                                style="flex:1;padding:4px 8px;background:#080c10;border:1px solid #21262d;color:#c9d1d9;border-radius:4px;font-size:11px;">
+                            <button id="agendador-salvar-template-btn"
+                                style="padding:4px 10px;background:#00d97e22;color:#00d97e;border:1px solid #00d97e33;border-radius:4px;cursor:pointer;font-size:11px;">
+                                Salvar atual
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Lista de ataques -->
+                <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:16px;">
+                    <div style="color:#00d97e;font-weight:bold;margin-bottom:12px;font-size:12px;">📋 Ataques Agendados</div>
+                    <div id="agendador-lista-ataques"></div>
+                </div>
+            </div>
+        `;
+
+        ui.mainLayout(contentHTML, '📝 Log de Atividades');
+
+        // Guarda referência para o log
+        uiLog = ui.log.bind(ui);
+
+        // Adiciona estilos personalizados para os botões e badges
+        const style = document.createElement('style');
+        style.textContent = `
+            .agendador-btn {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 6px 14px;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 11px;
+                font-weight: 700;
+                transition: all 0.15s;
+                font-family: inherit;
+            }
+            .agendador-btn-primary {
+                background: #00d97e;
+                color: #000;
+            }
+            .agendador-btn-primary:hover {
+                background: #33ffaa;
+                transform: translateY(-1px);
+            }
+            .agendador-btn-warning {
+                background: #c97c00;
+                color: #fff;
+            }
+            .agendador-btn-warning:hover {
+                background: #e8900a;
+                transform: translateY(-1px);
+            }
+            .agendador-btn-danger {
+                background: #f8514922;
+                color: #f85149;
+                border: 1px solid #f8514933;
+            }
+            .agendador-btn-danger:hover {
+                background: #f85149;
+                color: #fff;
+                transform: translateY(-1px);
+            }
+            .agendador-badge {
+                display: inline-block;
+                font-size: 9px;
+                font-weight: 600;
+                border-radius: 3px;
+                padding: 2px 6px;
+                border: 1px solid transparent;
+            }
+            .agendador-badge-green {
+                background: #00d97e22;
+                border-color: #00d97e33;
+                color: #00d97e;
+            }
+            .agendador-badge-red {
+                background: #f8514922;
+                border-color: #f8514933;
+                color: #f85149;
+            }
+            .agendador-badge-yellow {
+                background: #d2992222;
+                border-color: #d2992233;
+                color: #d29922;
+            }
+            .agendador-badge-blue {
+                background: #388bfd22;
+                border-color: #388bfd33;
+                color: #388bfd;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // ============================================
+        // EVENTOS
+        // ============================================
+        document.getElementById('agendador-agendar-btn')?.addEventListener('click', agendarAtaque);
+        document.getElementById('agendador-salvar-dados-btn')?.addEventListener('click', salvarDadosFormulario);
+        document.getElementById('agendador-limpar-concluidos-btn')?.addEventListener('click', limparConcluidos);
+        document.getElementById('agendador-destravar-btn')?.addEventListener('click', destravarAtaques);
+        document.getElementById('agendador-limpar-tudo-btn')?.addEventListener('click', limparTudo);
+        document.getElementById('agendador-importar-btn')?.addEventListener('click', importarBBCode);
+        document.getElementById('agendador-usar-todas-btn')?.addEventListener('click', async () => {
+            const origem = document.getElementById('agendador-origem').value.trim();
+            if (!origem) { adicionarLog('❌ Selecione uma vila origem primeiro!', 'error'); return; }
+            const villageId = _villageMap[origem];
+            if (!villageId) { adicionarLog('❌ Vila não encontrada no mapa!', 'error'); return; }
+            adicionarLog('⏳ Buscando tropas disponíveis...', 'info');
+            const allTroops = await getAllAvailableTroops(villageId);
+            if (allTroops) {
+                TROOP_IDS.forEach(t => {
+                    const inp = document.getElementById(`agendador-${t}`);
+                    if (inp && allTroops[t] !== undefined) inp.value = allTroops[t];
+                });
+                const total = Object.values(allTroops).reduce((a, b) => a + b, 0);
+                adicionarLog(`✅ Preenchido com ${number_format(total, '.')} tropas disponíveis!`, 'success');
+            } else {
+                adicionarLog('❌ Não foi possível obter as tropas!', 'error');
+            }
+        });
+
+        document.getElementById('agendador-salvar-template-btn')?.addEventListener('click', () => {
+            const name = document.getElementById('agendador-template-name')?.value.trim();
+            if (name) { saveCurrentAsTemplate(name); document.getElementById('agendador-template-name').value = ''; }
+            else { adicionarLog('❌ Digite um nome para o template!', 'error'); }
+        });
+
+        document.getElementById('agendador-btn-agora')?.addEventListener('click', () => {
+            preencherDataHoraAutomatica();
+            adicionarLog('✅ Horário do servidor inserido!', 'success');
+        });
+
+        document.getElementById('agendador-btn-mais1h')?.addEventListener('click', () => {
+            const [d, h] = adicionarMinutos(60).split(' ');
+            const dataInput = document.getElementById('agendador-data');
+            const horaInput = document.getElementById('agendador-hora');
+            if (dataInput) dataInput.value = d;
+            if (horaInput) horaInput.value = h;
+            adicionarLog('✅ +1 hora adicionada!', 'success');
+        });
+
+        document.getElementById('agendador-btn-mais30m')?.addEventListener('click', () => {
+            const [d, h] = adicionarMinutos(30).split(' ');
+            const dataInput = document.getElementById('agendador-data');
+            const horaInput = document.getElementById('agendador-hora');
+            if (dataInput) dataInput.value = d;
+            if (horaInput) horaInput.value = h;
+            adicionarLog('✅ +30 minutos adicionados!', 'success');
+        });
+
+        const origemSelect = document.getElementById('agendador-origem-select');
+        const origemInput  = document.getElementById('agendador-origem');
+        if (origemSelect && origemInput) {
+            origemSelect.addEventListener('change', () => { if (origemSelect.value) origemInput.value = origemSelect.value; });
+            origemInput.addEventListener('input',   () => { if (origemInput.value)  origemSelect.value = ''; });
+        }
 
         // ============================================
         // INICIALIZAÇÃO
@@ -944,209 +1233,20 @@
 
         try {
             await fetchMyVillages();
+            atualizarSelectAldeias();
         } catch (err) {
             console.error('[TWS] fetchMyVillages falhou:', err);
         }
 
-        const tropasGridHtml = TROOP_LIST.map(t => `
-            <div style="display:flex;justify-content:space-between;align-items:center;background:#1a1a1a;padding:5px 8px;border-radius:4px;">
-                <span style="font-size:11px;color:#ff6600;display:flex;align-items:center;gap:5px;">
-                    <img src="${t.icon}" style="width:16px;height:16px;"> ${t.nome}
-                </span>
-                <input type="number" id="${t.id}" value="0" min="0" step="1"
-                    style="width:70px;padding:3px;background:#0a0a0a;border:1px solid #444;color:#fff;border-radius:3px;text-align:center;">
-            </div>
-        `).join('');
-
-        document.body.style.cssText = 'background:#0a0a0a; margin:0; padding:20px; font-family:"Segoe UI",Arial,sans-serif;';
-        document.body.innerHTML = `
-            <div style="display:flex; gap:20px; max-width:1600px; margin:0 auto; min-height:calc(100vh - 40px);">
-
-                <!-- COLUNA PRINCIPAL (ESQUERDA) -->
-                <div style="flex:3;">
-                    <h1 style="color:#ff6600; margin:0 0 20px; border-bottom:1px solid #ff6600; padding-bottom:10px; font-size:18px;">⚔️ Agendador de Ataques — Dashboard</h1>
-
-                    <!-- Cards de estatísticas -->
-                    <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px;">
-                        <div style="background:#111; border:1px solid #ff660033; border-radius:10px; padding:12px; text-align:center;">
-                            <div style="font-size:24px; font-weight:bold; color:#ff6600;" id="totalAtaques">0</div>
-                            <div style="font-size:10px; color:#ff660088; margin-top:2px;">Total</div>
-                        </div>
-                        <div style="background:#111; border:1px solid #ff660033; border-radius:10px; padding:12px; text-align:center;">
-                            <div style="font-size:24px; font-weight:bold; color:#ff6600;" id="pendentesCount">0</div>
-                            <div style="font-size:10px; color:#ff660088; margin-top:2px;">Pendentes</div>
-                        </div>
-                        <div style="background:#111; border:1px solid #22a55a33; border-radius:10px; padding:12px; text-align:center;">
-                            <div style="font-size:24px; font-weight:bold; color:#22a55a;" id="sucessosCount">0</div>
-                            <div style="font-size:10px; color:#22a55a88; margin-top:2px;">Sucessos</div>
-                        </div>
-                        <div style="background:#111; border:1px solid #e24b4a33; border-radius:10px; padding:12px; text-align:center;">
-                            <div style="font-size:24px; font-weight:bold; color:#e24b4a;" id="falhasCount">0</div>
-                            <div style="font-size:10px; color:#e24b4a88; margin-top:2px;">Falhas</div>
-                        </div>
-                    </div>
-
-                    <!-- Formulário -->
-                    <div style="background:#111; border:1px solid #333; border-radius:10px; padding:15px; margin-bottom:20px;">
-                        <div style="color:#ff6600; font-weight:bold; margin-bottom:12px; font-size:12px;">📝 Novo Ataque</div>
-
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
-                            <div>
-                                <label style="display:block; font-size:10px; color:#888; margin-bottom:4px;">🏠 Vila Origem</label>
-                                <select id="origemSelect" style="width:100%; padding:6px; background:#0a0a0a; border:1px solid #444; color:#fff; border-radius:6px; margin-bottom:5px;"></select>
-                                <input type="text" id="origem" placeholder="Ou digite coordenadas (ex: 500|500)"
-                                    style="width:100%; padding:6px; background:#0a0a0a; border:1px solid #444; color:#fff; border-radius:6px; box-sizing:border-box;">
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:10px; color:#888; margin-bottom:4px;">🎯 Vila Alvo</label>
-                                <input type="text" id="alvo" placeholder="Ex: 510|510"
-                                    style="width:100%; padding:6px; background:#0a0a0a; border:1px solid #444; color:#fff; border-radius:6px; box-sizing:border-box;">
-                            </div>
-                        </div>
-
-                        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">
-                            <div>
-                                <label style="display:block; font-size:10px; color:#888; margin-bottom:4px;">📅 Data</label>
-                                <input type="text" id="data" placeholder="DD/MM/AAAA"
-                                    style="width:100%; padding:6px; background:#0a0a0a; border:1px solid #444; color:#fff; border-radius:6px; box-sizing:border-box;">
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:10px; color:#888; margin-bottom:4px;">⏰ Hora</label>
-                                <div style="display:flex; gap:5px;">
-                                    <input type="text" id="hora" value="00:00:00"
-                                        style="flex:1; padding:6px; background:#0a0a0a; border:1px solid #444; color:#fff; border-radius:6px;">
-                                    <button id="btnAgora"     style="padding:4px 8px; background:#2980b9; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:10px; white-space:nowrap;">Agora</button>
-                                    <button id="btnMais1Hora" style="padding:4px 8px; background:#27ae60; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:10px; white-space:nowrap;">+1h</button>
-                                    <button id="btnMais30Min" style="padding:4px 8px; background:#27ae60; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:10px; white-space:nowrap;">+30m</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div style="margin-bottom:10px;">
-                            <label style="display:block; font-size:10px; color:#888; margin-bottom:4px;">⚔️ Tropas <span style="color:#666;">(deixe vazio para AutoFill com todas as tropas disponíveis)</span></label>
-                            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px; background:#0a0a0a; padding:8px; border-radius:6px; max-height:200px; overflow-y:auto;">
-                                ${tropasGridHtml}
-                            </div>
-                        </div>
-
-                        <!-- Templates -->
-                        <div style="margin-bottom:12px; background:#0a0a0a; border:1px solid #333; border-radius:6px; padding:10px;">
-                            <div style="color:#ff6600; font-size:11px; font-weight:bold; margin-bottom:8px;">💾 Templates de Tropas</div>
-                            <div id="tws-template-list" style="max-height:120px; overflow-y:auto; margin-bottom:8px;"></div>
-                            <div style="display:flex; gap:6px;">
-                                <input type="text" id="tws-new-template-name" placeholder="Nome do template"
-                                    style="flex:1; padding:4px 8px; background:#111; border:1px solid #444; color:#fff; border-radius:4px; font-size:11px;">
-                                <button id="btnSalvarTemplate"
-                                    style="padding:4px 10px; background:#006600; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:11px;">
-                                    Salvar atual
-                                </button>
-                            </div>
-                        </div>
-
-                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                            <button id="agendarBtn"          style="padding:8px 16px; background:#ff6600; color:#000; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">📅 Agendar</button>
-                            <button id="usarTodasTropasBtn"  style="padding:8px 16px; background:#cc6600; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">🎯 Usar TODAS Tropas</button>
-                            <button id="importarBtn"         style="padding:8px 16px; background:#2980b9; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">📋 Importar BBCode</button>
-                            <button id="salvarDadosBtn"      style="padding:8px 16px; background:#006600; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">💾 Salvar</button>
-                            <button id="limparConcluidosBtn" style="padding:8px 16px; background:#884400; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">🧹 Limpar Concluídos</button>
-                            <button id="destravarBtn"        style="padding:8px 16px; background:#555500; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">🔓 Destravar</button>
-                            <button id="limparTudoBtn"       style="padding:8px 16px; background:#990000; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; font-size:12px;">🗑️ Limpar Tudo</button>
-                        </div>
-                    </div>
-
-                    <!-- Lista de ataques -->
-                    <div style="background:#111; border:1px solid #333; border-radius:10px; padding:15px;">
-                        <div style="color:#ff6600; font-weight:bold; margin-bottom:10px; font-size:12px;">📋 Ataques Agendados</div>
-                        <div id="listaAtaques" style="max-height:500px; overflow-y:auto;"></div>
-                    </div>
-                </div>
-
-                <!-- COLUNA DO LOG (DIREITA) -->
-                <div style="flex:1; background:#0a0a0a; border-left:1px solid #ff660033; padding-left:20px; min-width:220px;">
-                    <h3 style="color:#ff6600; font-size:13px; margin:0 0 12px;">📝 Log de Atividades</h3>
-                    <div id="log-area" style="height:calc(100vh - 80px); overflow-y:auto; font-family:monospace;"></div>
-                </div>
-
-            </div>
-        `;
-
-        adicionarLog = (msg, tipo) => {
-            const log = document.getElementById('log-area');
-            if (!log) return;
-            const t   = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            const cores = { ok: '#22a55a', err: '#e24b4a', warn: '#ff8800', info: '#888' };
-            const cor   = cores[tipo] || '#888';
-            const entry = document.createElement('div');
-            entry.style.cssText = 'display:flex;gap:8px;font-size:10px;margin-bottom:2px;';
-            entry.innerHTML = `<span style="color:#555;flex-shrink:0;">${t}</span><span style="color:${cor};">${msg}</span>`;
-            log.appendChild(entry);
-            log.scrollTop = log.scrollHeight;
-            while (log.children.length > 200) log.removeChild(log.children[0]);
-        };
-
-        atualizarSelectAldeias();
         carregarDadosFormulario();
         preencherDataHoraAutomatica();
         renderizarLista();
         atualizarEstatisticas();
         renderTemplateList();
 
-        const origemSelect = document.getElementById('origemSelect');
-        const origemInput  = document.getElementById('origem');
-        origemSelect.addEventListener('change', () => { if (origemSelect.value) origemInput.value = origemSelect.value; });
-        origemInput.addEventListener('input',   () => { if (origemInput.value)  origemSelect.value = ''; });
-
-        document.getElementById('agendarBtn').onclick          = agendarAtaque;
-        document.getElementById('salvarDadosBtn').onclick      = salvarDadosFormulario;
-        document.getElementById('limparConcluidosBtn').onclick = limparConcluidos;
-        document.getElementById('destravarBtn').onclick        = destravarAtaques;
-        document.getElementById('limparTudoBtn').onclick       = limparTudo;
-        document.getElementById('importarBtn').onclick         = importarBBCode;
-
-        document.getElementById('btnAgora').onclick = () => {
-            preencherDataHoraAutomatica();
-            adicionarLog('✅ Horário do servidor inserido!', 'ok');
-        };
-        document.getElementById('btnMais1Hora').onclick = () => {
-            const [d, h] = adicionarMinutos(60).split(' ');
-            document.getElementById('data').value = d;
-            document.getElementById('hora').value = h;
-            adicionarLog('✅ +1 hora adicionada!', 'ok');
-        };
-        document.getElementById('btnMais30Min').onclick = () => {
-            const [d, h] = adicionarMinutos(30).split(' ');
-            document.getElementById('data').value = d;
-            document.getElementById('hora').value = h;
-            adicionarLog('✅ +30 minutos adicionados!', 'ok');
-        };
-
-        document.getElementById('usarTodasTropasBtn').onclick = async () => {
-            const origem = document.getElementById('origem').value.trim();
-            if (!origem) { adicionarLog('❌ Selecione uma vila origem primeiro!', 'err'); return; }
-            const villageId = _villageMap[origem];
-            if (!villageId) { adicionarLog('❌ Vila não encontrada no mapa!', 'err'); return; }
-            adicionarLog('⏳ Buscando tropas disponíveis...', 'info');
-            const allTroops = await getAllAvailableTroops(villageId);
-            if (allTroops) {
-                TROOP_IDS.forEach(t => {
-                    const inp = document.getElementById(t);
-                    if (inp && allTroops[t] !== undefined) inp.value = allTroops[t];
-                });
-                const total = Object.values(allTroops).reduce((a, b) => a + b, 0);
-                adicionarLog(`✅ Preenchido com ${number_format(total, '.')} tropas disponíveis!`, 'ok');
-            } else {
-                adicionarLog('❌ Não foi possível obter as tropas!', 'err');
-            }
-        };
-
-        document.getElementById('btnSalvarTemplate').onclick = () => {
-            const name = document.getElementById('tws-new-template-name').value.trim();
-            if (name) { saveCurrentAsTemplate(name); document.getElementById('tws-new-template-name').value = ''; }
-            else       { adicionarLog('❌ Digite um nome para o template!', 'err'); }
-        };
-
         iniciarScheduler();
-        adicionarLog('✅ Dashboard v19.1 inicializado!', 'ok');
+
+        adicionarLog('✅ Dashboard v20.0 inicializado com TW UI Kit!', 'success');
         adicionarLog(`📋 ${_myVillages.length} aldeias carregadas`, 'info');
         adicionarLog(`⏱ Offset servidor: ${_serverTimeOffsetMs}ms`, 'info');
     }
