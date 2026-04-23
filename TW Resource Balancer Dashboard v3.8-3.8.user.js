@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TW Resource Balancer Dashboard v4.0
-// @version      4.0
-// @description  Balanceador de recursos com extração global (1 fetch), lógica de Crescimento Acelerado por Pontos, limite de 10k/envio para conta básica e detecção automática de Premium
+// @name         TW Resource Balancer Dashboard v4.1
+// @version      4.1
+// @description  Balanceador de recursos com extração global (1 fetch), lógica de Crescimento Acelerado por Pontos, limite de 10k/envio para conta básica, detecção automática de Premium e validação inteligente de mercadores
 // @match        https://*.tribalwars.com.br/game.php*
 // @grant        none
 // ==/UserScript==
@@ -10,7 +10,7 @@
     'use strict';
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // FALLBACK UI KIT (caso o script externo não carregue)
+    // FALLBACK UI KIT
     // ─────────────────────────────────────────────────────────────────────────────
     if (typeof window.TWUI === 'undefined') {
         window.TWUI = {
@@ -28,29 +28,25 @@
         DASHBOARD_PARAM: 'twBalancer=true',
         STORAGE_KEY: 'tw_balancer_v4',
 
-        // Dados carregados via extração global
         villagesData: [],
         loadingProgress: 0,
         carregando: false,
         enviando: false,
         premiumAtivo: false,
 
-        // Estatísticas globais
         totalWood: 0, totalStone: 0, totalIron: 0,
         mediaWood: 0, mediaStone: 0, mediaIron: 0,
         mediaPontos: 0,
 
-        // Controle de ciclo de envio
         usedOriginsInCycle: new Set(),
         usedDestinationsInCycle: new Set(),
 
-        // ── CONFIGURAÇÕES PADRÃO ──────────────────────────────────────────────────
         config: {
-            estoqueSegurancaDoadora: 30000,   // Recursos que a doadora NUNCA envia
-            limiteEnvioPorComando: 10000,      // Máx por viagem (conta básica)
-            limiteArmazemReceptora: 90,        // % máx do armazém da receptora a preencher
-            minEnvioIndividual: 1000,          // Quantidade mínima de 1 recurso para valer a pena
-            delayEntreLotes: 800,              // ms entre operações
+            estoqueSegurancaDoadora: 30000,
+            limiteEnvioPorComando: 10000,
+            limiteArmazemReceptora: 90,
+            minEnvioIndividual: 1000,
+            delayEntreLotes: 800,
             maxLogEntries: 250
         },
 
@@ -71,7 +67,7 @@
         // ─────────────────────────────────────────────────────────────────────────
 
         init() {
-            console.log('⚖️ TW Resource Balancer v4.0 - Extração Global + Crescimento Acelerado');
+            console.log('⚖️ TW Resource Balancer v4.1 - Extração Global + Validação Inteligente');
             if (window.location.href.includes(this.DASHBOARD_PARAM)) {
                 this.renderizarDashboard();
             } else {
@@ -85,7 +81,7 @@
 
             const btn = document.createElement('div');
             btn.id = 'tw-balancer-btn';
-            btn.innerHTML = '⚖️ Resource Balancer v4.0';
+            btn.innerHTML = '⚖️ Resource Balancer v4.1';
             Object.assign(btn.style, {
                 position: 'fixed', top: '80px', right: '10px', zIndex: '999999',
                 padding: '7px 13px', background: this.CORES.fundo,
@@ -105,10 +101,6 @@
 
         delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // LOG
-        // ─────────────────────────────────────────────────────────────────────────
-
         adicionarLog(msg, tipo) {
             const logArea = document.getElementById('tw-log-area');
             if (!logArea) return;
@@ -125,10 +117,6 @@
             while (logArea.children.length > this.config.maxLogEntries) logArea.removeChild(logArea.lastChild);
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // CONFIGURAÇÃO PERSISTENTE
-        // ─────────────────────────────────────────────────────────────────────────
-
         salvarConfig() { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.config)); },
 
         carregarConfig() {
@@ -136,20 +124,12 @@
             if (salvo) { try { this.config = { ...this.config, ...JSON.parse(salvo) }; } catch (e) {} }
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // DETECÇÃO DE CONTA PREMIUM
-        // ─────────────────────────────────────────────────────────────────────────
-
         detectarPremium() {
             if (typeof premium !== 'undefined' && premium === true) return true;
             if (window.game_data?.features?.Premium?.active === true) return true;
             if (document.body?.classList?.contains('has-pa')) return true;
             return false;
         },
-
-        // ─────────────────────────────────────────────────────────────────────────
-        // EXTRAÇÃO GLOBAL (1 único fetch — método híbrido)
-        // ─────────────────────────────────────────────────────────────────────────
 
         async extrairDadosGlobais() {
             this.premiumAtivo = this.detectarPremium();
@@ -166,67 +146,50 @@
             const doc = parser.parseFromString(html, 'text/html');
 
             const tabela = doc.getElementById('production_table');
-            if (!tabela) throw new Error('Tabela #production_table não encontrada. Verifique se você está na conta correta.');
+            if (!tabela) throw new Error('Tabela #production_table não encontrada.');
 
-            // Filtra linhas de aldeias (ignora headers)
             const linhas = Array.from(tabela.querySelectorAll('tr')).filter(tr =>
                 tr.querySelector('a[href*="screen=overview"]') && !tr.querySelector('th')
             );
 
-            if (linhas.length === 0) throw new Error('Nenhuma aldeia encontrada na tabela de produção.');
+            if (linhas.length === 0) throw new Error('Nenhuma aldeia encontrada.');
 
-            // offset=1 para premium (coluna de Notas extra), offset=0 para básico
             const off = this.premiumAtivo ? 1 : 0;
 
             const aldeias = linhas.map(linha => {
                 const c = linha.cells;
-
                 const textoAldeia = c[off]?.innerText?.trim() || '';
                 const coord = (textoAldeia.match(/\d{1,3}\|\d{1,3}/) || ['N/A'])[0];
                 const nome = textoAldeia.split('(')[0].trim();
-
-                // Extrai ID da aldeia do link
                 const link = c[off]?.querySelector('a[href*="village="]');
                 const idMatch = link?.href?.match(/village=(\d+)/);
                 const id = idMatch ? parseInt(idMatch[1]) : 0;
-
                 const pontos = parseInt((c[off + 1]?.innerText || '0').replace(/\./g, '')) || 0;
-
                 const resTexto = (c[off + 2]?.innerText || '').replace(/\./g, '');
                 const resNums = resTexto.match(/\d+/g) || [0, 0, 0];
                 const madeira = parseInt(resNums[0] || 0);
                 const argila  = parseInt(resNums[1] || 0);
                 const ferro   = parseInt(resNums[2] || 0);
-
                 const armazem = parseInt((c[off + 3]?.innerText || '0').replace(/\./g, '')) || 0;
-
-                // Fazenda (usada apenas para exibição futura)
                 const fazenda = c[off + 4]?.innerText?.trim() || '0/0';
 
                 return {
                     id, nome, coord, pontos,
                     wood: madeira, stone: argila, iron: ferro,
                     warehouseCapacity: armazem,
-                    // Espaço utilizável = 90% do armazém menos o que já há
                     espacoUtilizavel: Math.max(0, Math.floor(armazem * (this.config.limiteArmazemReceptora / 100)) - madeira - argila - ferro),
                     fazenda,
-                    // Campos de compatibilidade com a função de envio
                     woodACaminho: 0, stoneACaminho: 0, ironACaminho: 0,
-                    csrf: null,       // Preenchido sob demanda ao enviar
-                    merchants: 99     // Não disponível na visão global; validado no envio
+                    csrf: null,
+                    merchants: null,
+                    merchantsValidated: false
                 };
             });
 
-            return aldeias.filter(a => a.id > 0); // Ignora linhas sem ID válido
+            return aldeias.filter(a => a.id > 0);
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // OBTÉM CSRF E MERCADORES PARA UMA ALDEIA (chamado só no momento do envio)
-        // ─────────────────────────────────────────────────────────────────────────
-
-        // ── Extração de CSRF idêntica ao v3.8 original ──────────────────────────
         extrairCsrfToken(html) {
-            // 1. game_data inline (mais confiável — mesmo método do v3.8)
             const gdMatch = html.match(/TribalWars\.updateGameData\(({[\s\S]*?})\);/);
             if (gdMatch) {
                 try {
@@ -235,7 +198,6 @@
                 } catch(e) {}
             }
 
-            // 2. Padrões diretos (mesma ordem do v3.8)
             const patterns = [
                 /var csrf_token = '([a-f0-9]+)'/,
                 /name="h" value="([a-f0-9]+)"/i,
@@ -247,7 +209,6 @@
                 if (m?.[1]) return m[1];
             }
 
-            // 3. Fallback DOM — aceita qualquer input[name="h"] com valor alfanumérico
             try {
                 const doc = new DOMParser().parseFromString(html, 'text/html');
                 const el = doc.querySelector('input[name="h"]');
@@ -277,10 +238,6 @@
             return { csrf, merchants, woodNow, stoneNow, ironNow };
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // CARREGAR DADOS (único ponto de entrada — substitui o loop de aldeias)
-        // ─────────────────────────────────────────────────────────────────────────
-
         async carregarDados() {
             if (this.carregando) { this.adicionarLog('⏳ Carregamento já em andamento.', 'warning'); return; }
             this.carregando = true;
@@ -301,7 +258,7 @@
                 const aldeias = await this.extrairDadosGlobais();
 
                 if (aldeias.length === 0) {
-                    this.adicionarLog('❌ Nenhuma aldeia encontrada. Verifique se você está logado.', 'error');
+                    this.adicionarLog('❌ Nenhuma aldeia encontrada.', 'error');
                     return;
                 }
 
@@ -319,6 +276,10 @@
                 this.adicionarLog(`🛡️ Estoque de segurança doadora: ${this.config.estoqueSegurancaDoadora.toLocaleString()}`, 'info');
                 this.adicionarLog(`📦 Limite por comando: ${this.config.limiteEnvioPorComando.toLocaleString()} (conta ${this.premiumAtivo ? 'Premium' : 'Básica'})`, 'info');
 
+                if (!this.premiumAtivo) {
+                    this.adicionarLog('💡 Conta Básica: mercadores serão validados ao clicar em ENVIAR (ícone "?" na tabela)', 'info');
+                }
+
             } catch (err) {
                 this.adicionarLog(`❌ Erro na extração global: ${err.message}`, 'error');
                 console.error(err);
@@ -332,10 +293,6 @@
                 }, 2000);
             }
         },
-
-        // ─────────────────────────────────────────────────────────────────────────
-        // ESTATÍSTICAS
-        // ─────────────────────────────────────────────────────────────────────────
 
         calcularEstatisticas() {
             const n = this.villagesData.length;
@@ -366,7 +323,6 @@
                 const el = document.getElementById(id);
                 if (el) el.textContent = val.toLocaleString();
             }
-            // Badge Premium/Básico
             const badge = document.getElementById('tw-premium-badge');
             if (badge) {
                 badge.textContent = this.premiumAtivo ? '⭐ Premium' : '📋 Básica';
@@ -374,15 +330,7 @@
             }
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // LÓGICA DE CRESCIMENTO ACELERADO (regra por pontos)
-        // Doadoras: acima da média de pontos → enviam recursos parados
-        // Receptoras: abaixo da média de pontos → recebem, priorizando as menores
-        // Limite por comando: 10.000 unidades (conta básica)
-        // Segurança doadora: 30.000 de reserva por recurso
-        // Receptora: não ultrapassa 90% do armazém
-        // ─────────────────────────────────────────────────────────────────────────
-
+        // ⭐ FUNÇÃO CORRIGIDA - OCULTA ALDEIAS SEM MERCADORES
         getSugestoesBalanceamento() {
             this.usedOriginsInCycle.clear();
             this.usedDestinationsInCycle.clear();
@@ -392,14 +340,30 @@
             const minIndiv   = this.config.minEnvioIndividual;
             const pctArm     = this.config.limiteArmazemReceptora / 100;
 
-            // Classificação por pontos em relação à média
-            const doadoras   = this.villagesData
-                .filter(a => a.pontos >= this.mediaPontos)
-                .sort((a, b) => b.pontos - a.pontos);   // Maior para menor (mais recursos a ofertar)
+            // ⭐ FILTRO INTELIGENTE DE DOADORAS:
+            // - Premium: todas as aldeias acima da média
+            // - Básica: só inclui se tiver mercadores validados > 0 OU ainda não validou
+            const doadoras = this.villagesData
+                .filter(a => {
+                    if (a.pontos < this.mediaPontos) return false;
+
+                    // Conta Premium: sempre considera
+                    if (this.premiumAtivo) return true;
+
+                    // Conta Básica: verifica validação de mercadores
+                    if (a.merchantsValidated) {
+                        // Se já validou, só inclui se tem mercadores > 0
+                        return a.merchants > 0;
+                    }
+
+                    // Ainda não validou, inclui (vai validar no clique)
+                    return true;
+                })
+                .sort((a, b) => b.pontos - a.pontos);
 
             const receptoras = this.villagesData
                 .filter(a => a.pontos < this.mediaPontos)
-                .sort((a, b) => a.pontos - b.pontos);   // Menor para maior (prioridade máxima)
+                .sort((a, b) => a.pontos - b.pontos);
 
             const sugestoes = [];
 
@@ -412,7 +376,6 @@
 
                     const limiteArm = Math.floor(receptora.warehouseCapacity * pctArm);
 
-                    // Calcula disponível e espaço livre para cada recurso
                     const calcEnvio = (disponivel, atual) => {
                         const disp = Math.max(0, disponivel - seguranca);
                         const espaco = Math.max(0, limiteArm - atual);
@@ -420,15 +383,13 @@
                         return qtd >= minIndiv ? Math.floor(qtd) : 0;
                     };
 
-                    const enviarWood  = calcEnvio(doadora.wood,  receptora.wood);
-                    const enviarStone = calcEnvio(doadora.stone, receptora.stone);
-                    const enviarIron  = calcEnvio(doadora.iron,  receptora.iron);
+                    let enviarWood  = calcEnvio(doadora.wood,  receptora.wood);
+                    let enviarStone = calcEnvio(doadora.stone, receptora.stone);
+                    let enviarIron  = calcEnvio(doadora.iron,  receptora.iron);
 
                     const totalEnvio = enviarWood + enviarStone + enviarIron;
                     if (totalEnvio < minIndiv) continue;
 
-                    // Limita o total do comando a 10.000 (conta básica)
-                    // Se a soma ultrapassar, escala proporcionalmente
                     let wood = enviarWood, stone = enviarStone, iron = enviarIron;
                     if (totalEnvio > limiteCmd) {
                         const fator = limiteCmd / totalEnvio;
@@ -448,7 +409,6 @@
                         wood, stone, iron,
                         total,
                         merchantsNeeded,
-                        // Informações de contexto para o dashboard
                         pontosOrigem: doadora.pontos,
                         pontosDestino: receptora.pontos
                     });
@@ -456,7 +416,6 @@
                     this.usedOriginsInCycle.add(doadora.id);
                     this.usedDestinationsInCycle.add(receptora.id);
 
-                    // Simula o envio para evitar dupla sugestão inconsistente
                     doadora.wood  -= wood;
                     doadora.stone -= stone;
                     doadora.iron  -= iron;
@@ -464,34 +423,38 @@
                     receptora.stone += stone;
                     receptora.iron  += iron;
 
-                    break; // Cada doadora emparelha com 1 receptora por ciclo
+                    break;
                 }
             }
 
             return sugestoes;
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // ENVIO EM DUAS ETAPAS (simulação + confirmação)
-        // ─────────────────────────────────────────────────────────────────────────
-
         async enviarRecursos(origemId, destinoId, wood, stone, iron, botaoElement) {
-            if (this.enviando) { this.adicionarLog('⏳ Já há um envio em andamento.', 'warning'); return; }
+            if (this.enviando) {
+                this.adicionarLog('⏳ Já há um envio em andamento.', 'warning');
+                return;
+            }
 
-            const origem  = this.villagesData.find(v => v.id === origemId);
+            const origem = this.villagesData.find(v => v.id === origemId);
             const destino = this.villagesData.find(v => v.id === destinoId);
-            if (!origem || !destino) { this.adicionarLog('❌ Aldeia não encontrada internamente.', 'error'); return; }
+            if (!origem || !destino) {
+                this.adicionarLog('❌ Aldeia não encontrada internamente.', 'error');
+                return;
+            }
 
             this.enviando = true;
-            if (botaoElement) { botaoElement.disabled = true; botaoElement.textContent = '⏳ Verificando…'; }
+            if (botaoElement) {
+                botaoElement.disabled = true;
+                botaoElement.textContent = '⏳ Verificando…';
+            }
 
             try {
-                // Obtém CSRF e mercadores em tempo real
                 this.adicionarLog(`🔍 Obtendo detalhes de envio de ${origem.nome}...`, 'info');
                 const detalhes = await this.obterDetalhesEnvio(origemId);
 
                 if (!detalhes.csrf) {
-                    this.adicionarLog(`❌ ${origem.nome}: token CSRF não encontrado. Verifique o console (F12) — procure por "[CSRF DEBUG]" para ver os campos disponíveis e reporte ao desenvolvedor.`, 'error');
+                    this.adicionarLog(`❌ ${origem.nome}: token CSRF não encontrado.`, 'error');
                     return;
                 }
 
@@ -499,21 +462,28 @@
                 const merchantsNeeded = Math.ceil(totalRecursos / 1000);
 
                 if (detalhes.merchants < merchantsNeeded) {
-                    this.adicionarLog(`⚠️ ${origem.nome}: comerciantes insuficientes (${detalhes.merchants} disponíveis, ${merchantsNeeded} necessários).`, 'warning');
+                    origem.merchants = detalhes.merchants;
+                    origem.merchantsValidated = true;
+
+                    this.adicionarLog(`⚠️ ${origem.nome}: mercadores insuficientes (${detalhes.merchants} disponíveis, ${merchantsNeeded} necessários). Envio cancelado.`, 'warning');
+                    this.adicionarLog(`💡 Aguarde a reposição de mercadores em ${origem.nome}.`, 'info');
+
+                    this.renderizarTabela();
                     return;
                 }
 
-                // Valida reserva de segurança com dados em tempo real
+                origem.merchants = detalhes.merchants;
+                origem.merchantsValidated = true;
+
                 const seg = this.config.estoqueSegurancaDoadora;
                 if (detalhes.woodNow - wood < seg || detalhes.stoneNow - stone < seg || detalhes.ironNow - iron < seg) {
-                    this.adicionarLog(`❌ ${origem.nome}: envio violaria o estoque de segurança de ${seg.toLocaleString()}. Recarregue os dados.`, 'error');
+                    this.adicionarLog(`❌ ${origem.nome}: envio violaria o estoque de segurança de ${seg.toLocaleString()}.`, 'error');
                     return;
                 }
 
                 if (botaoElement) botaoElement.textContent = '⏳ Simulando…';
                 this.adicionarLog(`📤 [1/2] Simulando: 🌲${wood.toLocaleString()} 🧱${stone.toLocaleString()} ⚙️${iron.toLocaleString()} — ${origem.nome} → ${destino.nome}`, 'info');
 
-                // Etapa 1: Simular — idêntico ao v3.8 (com X-Requested-With)
                 const urlSim = `/game.php?village=${origemId}&screen=market&mode=send&try=confirm_send`;
                 const [destX, destY] = destino.coord.split('|');
                 const bodySim = new URLSearchParams({
@@ -536,28 +506,36 @@
                 if (!respSim.ok) throw new Error(`HTTP ${respSim.status} na simulação`);
                 const htmlSim = await respSim.text();
 
-                // Extrai CSRF da página de confirmação (mesmo método do v3.8)
+                const merchantsConfirmMatch = htmlSim.match(/market_merchant_available_count[^>]*>(\d+)</);
+                if (merchantsConfirmMatch) {
+                    const merchantsAposSimulacao = parseInt(merchantsConfirmMatch[1]);
+                    if (merchantsAposSimulacao < merchantsNeeded) {
+                        origem.merchants = merchantsAposSimulacao;
+                        this.adicionarLog(`⚠️ ${origem.nome}: mercadores esgotaram durante a simulação.`, 'warning');
+                        this.renderizarTabela();
+                        return;
+                    }
+                }
+
                 const csrfConfirm = this.extrairCsrfToken(htmlSim);
 
                 if (!csrfConfirm) {
-                    console.error('[CSRF-CONFIRM] HTML de confirmação (800 chars):', htmlSim.substring(0, 800));
-                    this.adicionarLog(`❌ Página de confirmação sem CSRF — verifique o console (F12).`, 'error');
+                    console.error('[CSRF-CONFIRM] HTML de confirmação:', htmlSim.substring(0, 800));
+                    this.adicionarLog(`❌ Página de confirmação sem CSRF.`, 'error');
                     return;
                 }
 
-                // Extrai quantidades e target_id da página de confirmação (igual ao v3.8)
                 const lerCampo = (regex, fallback) => { const m = htmlSim.match(regex); return m ? parseInt(m[1]) : fallback; };
-                const woodFinal  = lerCampo(/name="wood"\s+value="(\d+)"/i,  wood);
+                const woodFinal = lerCampo(/name="wood"\s+value="(\d+)"/i, wood);
                 const stoneFinal = lerCampo(/name="stone"\s+value="(\d+)"/i, stone);
-                const ironFinal  = lerCampo(/name="iron"\s+value="(\d+)"/i,  iron);
-                const tidMatch   = htmlSim.match(/name="target_id"\s+value="(\d+)"/i);
-                const targetId   = tidMatch ? tidMatch[1] : destinoId;
+                const ironFinal = lerCampo(/name="iron"\s+value="(\d+)"/i, iron);
+                const tidMatch = htmlSim.match(/name="target_id"\s+value="(\d+)"/i);
+                const targetId = tidMatch ? tidMatch[1] : destinoId;
                 const totalFinal = woodFinal + stoneFinal + ironFinal;
 
                 if (botaoElement) botaoElement.textContent = '⏳ Confirmando…';
                 this.adicionarLog('📤 [2/2] Confirmando envio…', 'info');
 
-                // Etapa 2: Confirmar — URL action=send (igual ao v3.8, sem x/y)
                 const urlConf = `/game.php?village=${origemId}&screen=market&action=send`;
                 const bodyConf = new URLSearchParams({
                     target_id: targetId,
@@ -580,14 +558,11 @@
                 if (!respConf.ok) throw new Error(`HTTP ${respConf.status} na confirmação`);
                 const htmlConf = await respConf.text();
 
-                // Detecção de resultado — igual ao v3.8 mas com prioridade invertida:
-                // verifica falha explícita primeiro, trata o resto como sucesso
                 const falhaConhecida = htmlConf.includes('insuficiente') ||
                                        htmlConf.includes('Você não possui recursos suficientes') ||
                                        htmlConf.includes('not enough') ||
                                        htmlConf.includes('zu wenig');
-                // O jogo redireciona de volta para o mercado após envio bem-sucedido
-                // e a palavra "error" aparece em classes CSS mesmo em páginas de sucesso — ignoramos ela
+
                 const sucessoEspecifico = htmlConf.includes('foram enviados') ||
                                           htmlConf.includes('Enviado com sucesso') ||
                                           htmlConf.includes('sucesso');
@@ -596,11 +571,18 @@
                 if (sucesso) {
                     this.adicionarLog(`✅ SUCESSO: ${merchantsNeeded} comerciante(s) | ${totalFinal.toLocaleString()} recursos | ${origem.nome} → ${destino.nome}`, 'success');
 
-                    // Atualiza estado local
-                    origem.wood  -= woodFinal;  origem.stone -= stoneFinal; origem.iron -= ironFinal;
-                    destino.wood += woodFinal;  destino.stone += stoneFinal; destino.iron += ironFinal;
+                    origem.wood -= woodFinal;
+                    origem.stone -= stoneFinal;
+                    origem.iron -= ironFinal;
+                    destino.wood += woodFinal;
+                    destino.stone += stoneFinal;
+                    destino.iron += ironFinal;
 
-                    // Recalcula espaço utilizável da receptora
+                    if (origem.merchants && origem.merchantsValidated) {
+                        origem.merchants -= merchantsNeeded;
+                        this.adicionarLog(`📊 ${origem.nome}: agora com ${origem.merchants} mercadores restantes.`, 'info');
+                    }
+
                     const limiteArm = Math.floor(destino.warehouseCapacity * (this.config.limiteArmazemReceptora / 100));
                     destino.espacoUtilizavel = Math.max(0, limiteArm - destino.wood - destino.stone - destino.iron);
 
@@ -618,31 +600,40 @@
                 console.error(err);
             } finally {
                 this.enviando = false;
-                if (botaoElement) setTimeout(() => { botaoElement.disabled = false; botaoElement.textContent = '📦 ENVIAR'; }, 1500);
+                if (botaoElement) setTimeout(() => {
+                    botaoElement.disabled = false;
+                    botaoElement.textContent = '📦 ENVIAR';
+                }, 1500);
             }
         },
 
-        // ─────────────────────────────────────────────────────────────────────────
-        // RENDERIZAÇÃO DA TABELA
-        // ─────────────────────────────────────────────────────────────────────────
+        escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        },
 
         renderizarTabela() {
             const tbody = document.getElementById('tw-lista-aldeias');
             if (!tbody) return;
 
             if (this.villagesData.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:${this.CORES.textoDim};padding:40px 0;">Clique em <strong style="color:${this.CORES.verde};">CARREGAR DADOS</strong> para iniciar.</td></tr>`;
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:' + this.CORES.textoDim + ';padding:40px 0;">Clique em <strong style="color:' + this.CORES.verde + ';">CARREGAR DADOS</strong> para iniciar.</td></tr>';
+                const countEl = document.getElementById('tw-sugestoes-count');
+                if (countEl) countEl.textContent = '';
                 return;
             }
 
-            // Clona o array antes de gerar sugestões para não mutar o original
             const snapshot = JSON.parse(JSON.stringify(this.villagesData));
             const sugestoes = this.getSugestoesBalanceamento();
-            // Restaura o original após o cálculo (getSugestoes muta para consistência interna)
             this.villagesData = snapshot;
 
             if (!sugestoes || sugestoes.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:${this.CORES.verde};font-weight:bold;">Todas as aldeias estão em equilíbrio!</span><br><span style="font-size:10px;color:${this.CORES.textoDim};">Segurança doadora: ${this.config.estoqueSegurancaDoadora.toLocaleString()} | Limite/cmd: ${this.config.limiteEnvioPorComando.toLocaleString()}</span></td></tr>`;
+                tbody.innerHTML = '<td><td colspan="4" style="text-align:center;padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:' + this.CORES.verde + ';font-weight:bold;">Todas as aldeias estão em equilíbrio!</span><br><span style="font-size:10px;color:' + this.CORES.textoDim + ';">Segurança doadora: ' + this.config.estoqueSegurancaDoadora.toLocaleString() + ' | Limite/cmd: ' + this.config.limiteEnvioPorComando.toLocaleString() + '</span></td></tr>';
                 const countEl = document.getElementById('tw-sugestoes-count');
                 if (countEl) countEl.textContent = 'Nenhuma sugestão';
                 return;
@@ -653,56 +644,67 @@
 
             for (const s of sugestoes) {
                 const { origem, destino } = s;
+
+                let mercadoresStatus = '';
+                let mercadoresTooltip = '';
+
+                if (!this.premiumAtivo) {
+                    if (origem.merchantsValidated && origem.merchants !== null) {
+                        mercadoresStatus = ' (' + origem.merchants + ' disp.)';
+                        mercadoresTooltip = '';
+                    } else {
+                        mercadoresStatus = ' (?)';
+                        mercadoresTooltip = 'title="⚠️ Conta Básica: mercadores serão validados ao enviar"';
+                    }
+                }
+
                 const pctArm = origem.warehouseCapacity > 0
                     ? Math.min(100, ((origem.wood + origem.stone + origem.iron) / origem.warehouseCapacity) * 100)
                     : 0;
 
                 const chips = [];
-                if (s.wood  > 0) chips.push(`<span class="tw-res-chip tw-chip-wood">🌲 ${s.wood.toLocaleString()}</span>`);
-                if (s.stone > 0) chips.push(`<span class="tw-res-chip tw-chip-stone">🧱 ${s.stone.toLocaleString()}</span>`);
-                if (s.iron  > 0) chips.push(`<span class="tw-res-chip tw-chip-iron">⚙️ ${s.iron.toLocaleString()}</span>`);
+                if (s.wood > 0) chips.push('<span class="tw-res-chip tw-chip-wood">🌲 ' + s.wood.toLocaleString() + '</span>');
+                if (s.stone > 0) chips.push('<span class="tw-res-chip tw-chip-stone">🧱 ' + s.stone.toLocaleString() + '</span>');
+                if (s.iron > 0) chips.push('<span class="tw-res-chip tw-chip-iron">⚙️ ' + s.iron.toLocaleString() + '</span>');
 
-                // Badge de pontos — destaca a diferença
                 const difPontos = origem.pontos - destino.pontos;
-                const difLabel = difPontos > 0 ? `+${difPontos.toLocaleString()} pts acima` : `${difPontos.toLocaleString()} pts`;
+                const difLabel = difPontos > 0 ? '+' + difPontos.toLocaleString() + ' pts acima' : difPontos.toLocaleString() + ' pts';
 
-                html += `
-                    <tr class="tw-row">
-                        <td class="tw-td-origin">
-                            <div class="tw-village-name">${origem.nome}</div>
-                            <div class="tw-village-coord">${origem.coord}</div>
-                            <div class="tw-village-pts" style="font-size:10px;color:${C.pontos};margin-top:2px;">🏅 ${origem.pontos.toLocaleString()} pts (DOADORA)</div>
-                            <div class="tw-fill-bar"><div class="tw-fill-inner" style="width:${pctArm.toFixed(1)}%"></div></div>
-                            <div class="tw-village-res">🌲${origem.wood.toLocaleString()} 🧱${origem.stone.toLocaleString()} ⚙️${origem.iron.toLocaleString()}</div>
-                        </td>
-                        <td class="tw-td-dest">
-                            <div class="tw-village-name">${destino.nome}</div>
-                            <div class="tw-village-coord">${destino.coord}</div>
-                            <div class="tw-village-pts" style="font-size:10px;color:${C.aviso};margin-top:2px;">📈 ${destino.pontos.toLocaleString()} pts (RECEPTORA)</div>
-                            <div style="font-size:9px;color:${C.textoDim};margin-top:2px;">↕ Diferença: ${difLabel}</div>
-                            <div class="tw-village-res">🌲${destino.wood.toLocaleString()} 🧱${destino.stone.toLocaleString()} ⚙️${destino.iron.toLocaleString()}</div>
-                            <div style="font-size:9px;color:${C.textoDim};margin-top:3px;">🏚️ ${destino.espacoUtilizavel.toLocaleString()} livre (≤${this.config.limiteArmazemReceptora}% armazém)</div>
-                        </td>
-                        <td class="tw-td-suggest">
-                            <div class="tw-chips">${chips.join('')}</div>
-                            <div class="tw-merchant-count">🚚 ${s.merchantsNeeded} comerciante(s) · 📦 ${s.total.toLocaleString()} (limite ${this.config.limiteEnvioPorComando.toLocaleString()})</div>
-                        </td>
-                        <td class="tw-td-action">
-                            <button class="tw-send-btn" onclick="TWResourceBalancer.enviarRecursos(${origem.id}, ${destino.id}, ${s.wood}, ${s.stone}, ${s.iron}, this)">📦 ENVIAR</button>
-                        </td>
-                    </tr>
-                `;
+                html += '<tr class="tw-row">';
+                html += '<td class="tw-td-origin">';
+                html += '<div class="tw-village-name">' + this.escapeHtml(origem.nome) + '</div>';
+                html += '<div class="tw-village-coord">' + origem.coord + '</div>';
+                html += '<div class="tw-village-pts" style="font-size:10px;color:' + C.pontos + ';margin-top:2px;">🏅 ' + origem.pontos.toLocaleString() + ' pts (DOADORA)</div>';
+                html += '<div class="tw-fill-bar"><div class="tw-fill-inner" style="width:' + pctArm.toFixed(1) + '%"></div></div>';
+                html += '<div class="tw-village-res">🌲' + origem.wood.toLocaleString() + ' 🧱' + origem.stone.toLocaleString() + ' ⚙️' + origem.iron.toLocaleString() + '</div>';
+                html += '<div class="tw-merchant-status" style="font-size:8px;color:' + C.textoDim + ';margin-top:3px;" ' + mercadoresTooltip + '>🚚 Mercadores' + mercadoresStatus + '</div>';
+                html += '</td>';
+
+                html += '<td class="tw-td-dest">';
+                html += '<div class="tw-village-name">' + this.escapeHtml(destino.nome) + '</div>';
+                html += '<div class="tw-village-coord">' + destino.coord + '</div>';
+                html += '<div class="tw-village-pts" style="font-size:10px;color:' + C.aviso + ';margin-top:2px;">📈 ' + destino.pontos.toLocaleString() + ' pts (RECEPTORA)</div>';
+                html += '<div style="font-size:9px;color:' + C.textoDim + ';margin-top:2px;">↕ Diferença: ' + difLabel + '</div>';
+                html += '<div class="tw-village-res">🌲' + destino.wood.toLocaleString() + ' 🧱' + destino.stone.toLocaleString() + ' ⚙️' + destino.iron.toLocaleString() + '</div>';
+                html += '<div style="font-size:9px;color:' + C.textoDim + ';margin-top:3px;">🏚️ ' + destino.espacoUtilizavel.toLocaleString() + ' livre (≤' + this.config.limiteArmazemReceptora + '% armazém)</div>';
+                html += '</td>';
+
+                html += '<td class="tw-td-suggest">';
+                html += '<div class="tw-chips">' + chips.join('') + '</div>';
+                html += '<div class="tw-merchant-count">🚚 ' + s.merchantsNeeded + ' comerciante(s) · 📦 ' + s.total.toLocaleString() + ' (limite ' + this.config.limiteEnvioPorComando.toLocaleString() + ')</div>';
+                html += '</td>';
+
+                html += '<td class="tw-td-action">';
+                html += '<button class="tw-send-btn" onclick="TWResourceBalancer.enviarRecursos(' + origem.id + ', ' + destino.id + ', ' + s.wood + ', ' + s.stone + ', ' + s.iron + ', this)">📦 ENVIAR</button>';
+                html += '</td>';
+                html += '</tr>';
             }
 
             tbody.innerHTML = html;
 
             const countEl = document.getElementById('tw-sugestoes-count');
-            if (countEl) countEl.textContent = `${sugestoes.length} sugestão(ões) — Crescimento Acelerado por Pontos`;
+            if (countEl) countEl.textContent = sugestoes.length + ' sugestão(ões) — Crescimento Acelerado por Pontos';
         },
-
-        // ─────────────────────────────────────────────────────────────────────────
-        // RENDERIZAÇÃO DO DASHBOARD
-        // ─────────────────────────────────────────────────────────────────────────
 
         renderizarDashboard() {
             document.body.innerHTML = '';
@@ -710,7 +712,7 @@
 
             const C = this.CORES;
 
-            document.body.style.cssText = `background:${C.fundo};margin:0;padding:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:${C.texto};min-height:100vh;`;
+            document.body.style.cssText = 'background:' + C.fundo + ';margin:0;padding:0;font-family:\'Segoe UI\',system-ui,-apple-system,sans-serif;color:' + C.texto + ';min-height:100vh;';
 
             document.body.innerHTML = `
                 <style>
@@ -788,7 +790,7 @@
 
                 <div id="tw-app">
                     <div id="tw-header">
-                        <h1>⚖️ TW Resource Balancer <span>v4.0 — Crescimento Acelerado</span></h1>
+                        <h1>⚖️ TW Resource Balancer <span>v4.1 — Crescimento Acelerado + Validação Inteligente</span></h1>
                         <div id="tw-header-right">
                             <span id="tw-premium-badge" style="font-size:11px;color:${C.textoDim};">— conta —</span>
                         </div>
@@ -857,15 +859,10 @@
                         <div id="tw-table-panel">
                             <table class="tw-table">
                                 <thead>
-                                    <tr>
-                                        <th>🏅 Doadora (acima da média)</th>
-                                        <th>📈 Receptora (abaixo da média)</th>
-                                        <th>Sugestão de Envio</th>
-                                        <th>Ação</th>
-                                    </tr>
+                                    <tr><th>🏅 Doadora (acima da média)</th><th>📈 Receptora (abaixo da média)</th><th>Sugestão de Envio</th><th>Ação</th></tr>
                                 </thead>
                                 <tbody id="tw-lista-aldeias">
-                                    <tr><td colspan="4" style="text-align:center;color:${C.textoDim};padding:40px 0;">Clique em <strong style="color:${C.verde};">CARREGAR DADOS</strong> para iniciar a extração global.</td></tr>
+                                    <tr><td colspan="4" style="text-align:center;color:${C.textoDim};padding:40px 0;">Clique em <strong style="color:${C.verde};">CARREGAR DADOS</strong> para iniciar.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -877,12 +874,17 @@
                 </div>
             `;
 
-            this.adicionarLog('⚖️ TW Resource Balancer v4.0 iniciado.', 'info');
+            this.adicionarLog('⚖️ TW Resource Balancer v4.1 iniciado.', 'info');
             this.adicionarLog('🚀 Extração global ativa: apenas 1 fetch para todas as aldeias!', 'success');
             this.adicionarLog('🏅 Lógica: Crescimento Acelerado por Pontos de Evolução.', 'info');
-            this.adicionarLog(`📦 Limite por comando: ${this.config.limiteEnvioPorComando.toLocaleString()} (conta básica).`, 'info');
+            this.adicionarLog('📦 Limite por comando: ' + this.config.limiteEnvioPorComando.toLocaleString() + ' (conta ' + (this.premiumAtivo ? 'Premium' : 'Básica') + ').', 'info');
 
-            // Bind das configurações
+            if (!this.premiumAtivo) {
+                this.adicionarLog('💡 Conta Básica detectada: mercadores serão validados apenas no momento do envio.', 'info');
+                this.adicionarLog('🔍 Ícone (?) indica que os mercadores ainda não foram verificados.', 'info');
+                this.adicionarLog('✨ Aldeias sem mercadores serão ocultadas automaticamente após validação.', 'info');
+            }
+
             const bindConfig = (id, key, parser) => {
                 const el = document.getElementById(id);
                 if (!el) return;
@@ -890,7 +892,7 @@
                     this.config[key] = parser(e.target.value);
                     this.salvarConfig();
                     if (this.villagesData.length > 0) this.renderizarTabela();
-                    this.adicionarLog(`⚙️ ${key} → ${this.config[key]}`, 'info');
+                    this.adicionarLog('⚙️ ' + key + ' → ' + this.config[key], 'info');
                 };
             };
 
@@ -904,9 +906,6 @@
         }
     };
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // BOOT
-    // ─────────────────────────────────────────────────────────────────────────────
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => TWResourceBalancer.init());
     } else {
