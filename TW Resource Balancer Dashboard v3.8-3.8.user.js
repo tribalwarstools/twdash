@@ -1,29 +1,23 @@
 // ==UserScript==
-// @name         TW Resource Balancer Dashboard v3.8
-// @version      3.8
-// @description  Balanceador de recursos com proteção anti-esgotamento, reserva mínima e marcação de origem - CORRIGIDO
+// @name         TW Resource Balancer Dashboard v4.0
+// @version      4.0
+// @description  Balanceador de recursos com extração global (1 fetch), lógica de Crescimento Acelerado por Pontos, limite de 10k/envio para conta básica e detecção automática de Premium
 // @match        https://*.tribalwars.com.br/game.php*
-// @require      https://tribalwarstools.github.io/twscripts/tw-ui-kit.js
 // @grant        none
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    // Verifica se o UI Kit foi carregado
+    // ─────────────────────────────────────────────────────────────────────────────
+    // FALLBACK UI KIT (caso o script externo não carregue)
+    // ─────────────────────────────────────────────────────────────────────────────
     if (typeof window.TWUI === 'undefined') {
-        console.warn('TW UI Kit não carregado, usando fallback manual');
         window.TWUI = {
             colors: {
-                primary: '#00d97e',
-                success: '#00d97e',
-                error: '#f85149',
-                warning: '#d29922',
-                info: '#388bfd',
-                dark: '#080c10',
-                darker: '#0d1117',
-                text: '#c9d1d9',
-                textDim: '#8b949e'
+                primary: '#00d97e', success: '#00d97e', error: '#f85149',
+                warning: '#d29922', info: '#388bfd', dark: '#080c10',
+                darker: '#0d1117', text: '#c9d1d9', textDim: '#8b949e'
             },
             formatNumber: (n) => n?.toLocaleString() || '0',
             showNotification: (msg, type) => console.log(`[${type}] ${msg}`)
@@ -32,62 +26,52 @@
 
     const TWResourceBalancer = {
         DASHBOARD_PARAM: 'twBalancer=true',
-        STORAGE_KEY: 'tw_balancer_v3',
+        STORAGE_KEY: 'tw_balancer_v4',
 
+        // Dados carregados via extração global
         villagesData: [],
-        cacheVillages: [],
         loadingProgress: 0,
         carregando: false,
         enviando: false,
+        premiumAtivo: false,
 
-        config: {
-            toleranciaPercentual: 5,
-            minEnvio: 1000,
-            bufferPercentual: 10,
-            reservaMinimaPercentual: 30,
-            delayEntreLotes: 800,
-            maxLogEntries: 250
-        },
+        // Estatísticas globais
+        totalWood: 0, totalStone: 0, totalIron: 0,
+        mediaWood: 0, mediaStone: 0, mediaIron: 0,
+        mediaPontos: 0,
 
-        totalWood: 0,
-        totalStone: 0,
-        totalIron: 0,
-        mediaWood: 0,
-        mediaStone: 0,
-        mediaIron: 0,
-
+        // Controle de ciclo de envio
         usedOriginsInCycle: new Set(),
         usedDestinationsInCycle: new Set(),
 
-        CORES: {
-            fundo: '#080c10',
-            fundoCard: '#0d1117',
-            fundoTabela: '#0b0f14',
-            verde: '#00d97e',
-            verdeEscuro: '#001a0e',
-            verdeClaro: '#33ffaa',
-            verdeDim: '#00d97e22',
-            texto: '#c9d1d9',
-            textoDim: '#8b949e',
-            borda: '#21262d',
-            bordaVerde: '#00d97e33',
-            erro: '#f85149',
-            erroDim: '#f8514922',
-            aviso: '#d29922',
-            avisoDim: '#d2992222',
-            info: '#388bfd',
-            infoDim: '#388bfd22',
-            madeira: '#8b6914',
-            pedra: '#607080',
-            ferro: '#5a8a9f'
+        // ── CONFIGURAÇÕES PADRÃO ──────────────────────────────────────────────────
+        config: {
+            estoqueSegurancaDoadora: 30000,   // Recursos que a doadora NUNCA envia
+            limiteEnvioPorComando: 10000,      // Máx por viagem (conta básica)
+            limiteArmazemReceptora: 90,        // % máx do armazém da receptora a preencher
+            minEnvioIndividual: 1000,          // Quantidade mínima de 1 recurso para valer a pena
+            delayEntreLotes: 800,              // ms entre operações
+            maxLogEntries: 250
         },
 
-        // ─────────────────────────────────────────────────────────────
+        CORES: {
+            fundo: '#080c10', fundoCard: '#0d1117', fundoTabela: '#0b0f14',
+            verde: '#00d97e', verdeEscuro: '#001a0e', verdeClaro: '#33ffaa',
+            verdeDim: '#00d97e22', texto: '#c9d1d9', textoDim: '#8b949e',
+            borda: '#21262d', bordaVerde: '#00d97e33',
+            erro: '#f85149', erroDim: '#f8514922',
+            aviso: '#d29922', avisoDim: '#d2992222',
+            info: '#388bfd', infoDim: '#388bfd22',
+            madeira: '#8b6914', pedra: '#607080', ferro: '#5a8a9f',
+            pontos: '#a78bfa'
+        },
+
+        // ─────────────────────────────────────────────────────────────────────────
         // INICIALIZAÇÃO
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
 
         init() {
-            console.log('⚖️ TW Resource Balancer v3.8 - Inicializando...');
+            console.log('⚖️ TW Resource Balancer v4.0 - Extração Global + Crescimento Acelerado');
             if (window.location.href.includes(this.DASHBOARD_PARAM)) {
                 this.renderizarDashboard();
             } else {
@@ -96,40 +80,22 @@
         },
 
         adicionarBotaoAbrirDashboard() {
-            if (!document.body) {
-                setTimeout(() => this.adicionarBotaoAbrirDashboard(), 100);
-                return;
-            }
+            if (!document.body) { setTimeout(() => this.adicionarBotaoAbrirDashboard(), 100); return; }
             if (document.getElementById('tw-balancer-btn')) return;
 
             const btn = document.createElement('div');
             btn.id = 'tw-balancer-btn';
-            btn.innerHTML = '⚖️ Resource Balancer v3.8';
+            btn.innerHTML = '⚖️ Resource Balancer v4.0';
             Object.assign(btn.style, {
-                position: 'fixed',
-                top: '80px',
-                right: '10px',
-                zIndex: '999999',
-                padding: '7px 13px',
-                background: this.CORES.fundo,
-                color: this.CORES.verde,
-                border: `1px solid ${this.CORES.verde}55`,
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontFamily: 'monospace',
-                fontWeight: 'bold',
-                fontSize: '11px',
-                boxShadow: '0 2px 10px #00d97e15',
+                position: 'fixed', top: '80px', right: '10px', zIndex: '999999',
+                padding: '7px 13px', background: this.CORES.fundo,
+                color: this.CORES.verde, border: `1px solid ${this.CORES.verde}55`,
+                borderRadius: '6px', cursor: 'pointer', fontFamily: 'monospace',
+                fontWeight: 'bold', fontSize: '11px', boxShadow: '0 2px 10px #00d97e15',
                 transition: 'all 0.2s ease'
             });
-            btn.onmouseenter = () => {
-                btn.style.borderColor = this.CORES.verde;
-                btn.style.boxShadow = '0 2px 14px #00d97e44';
-            };
-            btn.onmouseleave = () => {
-                btn.style.borderColor = `${this.CORES.verde}55`;
-                btn.style.boxShadow = '0 2px 10px #00d97e15';
-            };
+            btn.onmouseenter = () => { btn.style.borderColor = this.CORES.verde; btn.style.boxShadow = '0 2px 14px #00d97e44'; };
+            btn.onmouseleave = () => { btn.style.borderColor = `${this.CORES.verde}55`; btn.style.boxShadow = '0 2px 10px #00d97e15'; };
             btn.onclick = () => {
                 const url = window.location.href.split('?')[0] + '?' + this.DASHBOARD_PARAM;
                 window.open(url, 'TWBalancer');
@@ -137,429 +103,253 @@
             document.body.appendChild(btn);
         },
 
-        delay(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-        },
+        delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); },
 
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
         // LOG
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
 
         adicionarLog(msg, tipo) {
             const logArea = document.getElementById('tw-log-area');
             if (!logArea) return;
 
             const time = new Date().toLocaleTimeString();
-            const cores = {
-                success: this.CORES.verde,
-                error: this.CORES.erro,
-                warning: this.CORES.aviso,
-                info: this.CORES.info
-            };
-            const icones = {
-                success: '●',
-                error: '●',
-                warning: '●',
-                info: '●'
-            };
+            const cores = { success: this.CORES.verde, error: this.CORES.erro, warning: this.CORES.aviso, info: this.CORES.info };
             const cor = cores[tipo] || this.CORES.textoDim;
-            const icone = icones[tipo] || '○';
 
             const entry = document.createElement('div');
-            entry.style.cssText = `
-                padding: 5px 0;
-                border-bottom: 1px solid ${this.CORES.borda};
-                font-size: 11px;
-                font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-                display: flex;
-                gap: 8px;
-                align-items: baseline;
-            `;
-            entry.innerHTML = `
-                <span style="color:${cor}; flex-shrink:0;">${icone}</span>
-                <span style="color:${this.CORES.textoDim}; flex-shrink:0;">${time}</span>
-                <span style="color:${cor};">${msg}</span>
-            `;
+            entry.style.cssText = `padding:5px 0; border-bottom:1px solid ${this.CORES.borda}; font-size:11px; font-family:'JetBrains Mono','Fira Code',Consolas,monospace; display:flex; gap:8px; align-items:baseline;`;
+            entry.innerHTML = `<span style="color:${cor};flex-shrink:0;">●</span><span style="color:${this.CORES.textoDim};flex-shrink:0;">${time}</span><span style="color:${cor};">${msg}</span>`;
             logArea.insertBefore(entry, logArea.firstChild);
 
-            while (logArea.children.length > this.config.maxLogEntries) {
-                logArea.removeChild(logArea.lastChild);
-            }
+            while (logArea.children.length > this.config.maxLogEntries) logArea.removeChild(logArea.lastChild);
         },
 
-        // ─────────────────────────────────────────────────────────────
-        // CONFIGURAÇÃO
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
+        // CONFIGURAÇÃO PERSISTENTE
+        // ─────────────────────────────────────────────────────────────────────────
 
-        salvarConfig() {
-            localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.config));
-        },
+        salvarConfig() { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.config)); },
 
         carregarConfig() {
             const salvo = localStorage.getItem(this.STORAGE_KEY);
-            if (salvo) {
-                try {
-                    this.config = { ...this.config, ...JSON.parse(salvo) };
-                } catch (e) {
-                    console.warn('Config inválida no localStorage, usando padrão.');
-                }
-            }
+            if (salvo) { try { this.config = { ...this.config, ...JSON.parse(salvo) }; } catch (e) {} }
         },
 
-        // ─────────────────────────────────────────────────────────────
-        // OBTÉM ID DO JOGADOR DE MÚLTIPLAS FONTES
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
+        // DETECÇÃO DE CONTA PREMIUM
+        // ─────────────────────────────────────────────────────────────────────────
 
-        async obterIdJogador() {
-            // 1. window.game_data (padrão)
-            if (window.game_data?.player?.id) {
-                return window.game_data.player.id;
-            }
+        detectarPremium() {
+            if (typeof premium !== 'undefined' && premium === true) return true;
+            if (window.game_data?.features?.Premium?.active === true) return true;
+            if (document.body?.classList?.contains('has-pa')) return true;
+            return false;
+        },
 
-            // 2. Variável global do Tribal Wars
-            if (window.TribalWars?.getPlayerId) {
+        // ─────────────────────────────────────────────────────────────────────────
+        // EXTRAÇÃO GLOBAL (1 único fetch — método híbrido)
+        // ─────────────────────────────────────────────────────────────────────────
+
+        async extrairDadosGlobais() {
+            this.premiumAtivo = this.detectarPremium();
+            const tipoContaLabel = this.premiumAtivo ? '⭐ PREMIUM' : '📋 BÁSICA';
+            this.adicionarLog(`${tipoContaLabel} detectada — offset da tabela: ${this.premiumAtivo ? 1 : 0}`, 'info');
+
+            const url = `${window.location.origin}/game.php?village=${game_data.village.id}&screen=overview_villages&mode=prod&group=0&page=-1`;
+
+            const response = await fetch(url, { credentials: 'same-origin' });
+            if (!response.ok) throw new Error(`HTTP ${response.status} ao buscar overview_villages`);
+
+            const html = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+
+            const tabela = doc.getElementById('production_table');
+            if (!tabela) throw new Error('Tabela #production_table não encontrada. Verifique se você está na conta correta.');
+
+            // Filtra linhas de aldeias (ignora headers)
+            const linhas = Array.from(tabela.querySelectorAll('tr')).filter(tr =>
+                tr.querySelector('a[href*="screen=overview"]') && !tr.querySelector('th')
+            );
+
+            if (linhas.length === 0) throw new Error('Nenhuma aldeia encontrada na tabela de produção.');
+
+            // offset=1 para premium (coluna de Notas extra), offset=0 para básico
+            const off = this.premiumAtivo ? 1 : 0;
+
+            const aldeias = linhas.map(linha => {
+                const c = linha.cells;
+
+                const textoAldeia = c[off]?.innerText?.trim() || '';
+                const coord = (textoAldeia.match(/\d{1,3}\|\d{1,3}/) || ['N/A'])[0];
+                const nome = textoAldeia.split('(')[0].trim();
+
+                // Extrai ID da aldeia do link
+                const link = c[off]?.querySelector('a[href*="village="]');
+                const idMatch = link?.href?.match(/village=(\d+)/);
+                const id = idMatch ? parseInt(idMatch[1]) : 0;
+
+                const pontos = parseInt((c[off + 1]?.innerText || '0').replace(/\./g, '')) || 0;
+
+                const resTexto = (c[off + 2]?.innerText || '').replace(/\./g, '');
+                const resNums = resTexto.match(/\d+/g) || [0, 0, 0];
+                const madeira = parseInt(resNums[0] || 0);
+                const argila  = parseInt(resNums[1] || 0);
+                const ferro   = parseInt(resNums[2] || 0);
+
+                const armazem = parseInt((c[off + 3]?.innerText || '0').replace(/\./g, '')) || 0;
+
+                // Fazenda (usada apenas para exibição futura)
+                const fazenda = c[off + 4]?.innerText?.trim() || '0/0';
+
+                return {
+                    id, nome, coord, pontos,
+                    wood: madeira, stone: argila, iron: ferro,
+                    warehouseCapacity: armazem,
+                    // Espaço utilizável = 90% do armazém menos o que já há
+                    espacoUtilizavel: Math.max(0, Math.floor(armazem * (this.config.limiteArmazemReceptora / 100)) - madeira - argila - ferro),
+                    fazenda,
+                    // Campos de compatibilidade com a função de envio
+                    woodACaminho: 0, stoneACaminho: 0, ironACaminho: 0,
+                    csrf: null,       // Preenchido sob demanda ao enviar
+                    merchants: 99     // Não disponível na visão global; validado no envio
+                };
+            });
+
+            return aldeias.filter(a => a.id > 0); // Ignora linhas sem ID válido
+        },
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // OBTÉM CSRF E MERCADORES PARA UMA ALDEIA (chamado só no momento do envio)
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // ── Extração de CSRF idêntica ao v3.8 original ──────────────────────────
+        extrairCsrfToken(html) {
+            // 1. game_data inline (mais confiável — mesmo método do v3.8)
+            const gdMatch = html.match(/TribalWars\.updateGameData\(({[\s\S]*?})\);/);
+            if (gdMatch) {
                 try {
-                    return window.TribalWars.getPlayerId();
+                    const gd = JSON.parse(gdMatch[1]);
+                    if (gd.csrf) return gd.csrf;
                 } catch(e) {}
             }
 
-            // 3. Busca no HTML da página atual
-            try {
-                const response = await fetch(window.location.href, { credentials: 'same-origin' });
-                const html = await response.text();
-
-                const patterns = [
-                    /player_id["']?\s*[=:]\s*["']?(\d+)/i,
-                    /"player_id":(\d+)/i,
-                    /player=(\d+)/i,
-                    /id=(\d+).*?player/i
-                ];
-
-                for (const pattern of patterns) {
-                    const match = html.match(pattern);
-                    if (match && match[1]) {
-                        return parseInt(match[1]);
-                    }
-                }
-            } catch(e) {}
-
-            // 4. Busca na lista de aldeias primeiro
-            try {
-                const response = await fetch('/map/village.txt', { credentials: 'same-origin' });
-                const dados = await response.text();
-                const linhas = dados.trim().split('\n');
-
-                if (linhas.length > 0) {
-                    const primeiraAldeia = linhas[0].split(',');
-                    if (primeiraAldeia[4]) {
-                        return parseInt(primeiraAldeia[4]);
-                    }
-                }
-            } catch(e) {}
-
-            return null;
-        },
-
-        // ─────────────────────────────────────────────────────────────
-        // OBTER ALDEIAS DO JOGADOR
-        // ─────────────────────────────────────────────────────────────
-
-        async obterTodasAldeias(forcarRecarga = false) {
-            if (!forcarRecarga && this.cacheVillages.length > 0) {
-                return this.cacheVillages;
-            }
-
-            const meuId = await this.obterIdJogador();
-
-            if (!meuId) {
-                this.adicionarLog('❌ Não foi possível obter o ID do jogador. Você está logado?', 'error');
-                return [];
-            }
-
-            this.adicionarLog(`✅ ID do jogador detectado: ${meuId}`, 'success');
-
-            try {
-                const response = await fetch('/map/village.txt', { credentials: 'same-origin' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const dados = await response.text();
-
-                if (!dados || dados.trim() === '') {
-                    this.adicionarLog('❌ Lista de aldeias vazia.', 'error');
-                    return [];
-                }
-
-                const todasAldeias = dados.trim().split('\n')
-                    .map(line => {
-                        const [id, name, x, y, player, points] = line.split(',');
-                        return {
-                            id: parseInt(id),
-                            nome: decodeURIComponent(name?.replace(/\+/g, ' ') || 'Desconhecida'),
-                            coord: `${x}|${y}`,
-                            player: parseInt(player),
-                            pontos: parseInt(points) || 0
-                        };
-                    });
-
-                this.cacheVillages = todasAldeias.filter(v => v.player === meuId);
-
-                if (this.cacheVillages.length === 0) {
-                    this.adicionarLog(`⚠️ Nenhuma aldeia encontrada para o jogador ${meuId}.`, 'warning');
-                }
-
-                return this.cacheVillages;
-            } catch (err) {
-                this.adicionarLog(`❌ Erro ao carregar lista de aldeias: ${err.message}`, 'error');
-                return [];
-            }
-        },
-
-        // ─────────────────────────────────────────────────────────────
-        // EXTRAÇÃO DE DADOS
-        // ─────────────────────────────────────────────────────────────
-
-        extrairRecursosEntrada(htmlString) {
-            const incoming = { wood: 0, stone: 0, iron: 0 };
-
-            try {
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(htmlString, 'text/html');
-                const allText = doc.body.innerText || '';
-                const entradaIndex = allText.indexOf('Entrada:');
-                if (entradaIndex === -1) return incoming;
-
-                const afterEntrada = allText.substring(entradaIndex);
-                const numeros = afterEntrada.match(/(\d+(?:\.\d+)?)/g) || [];
-
-                const temWood = afterEntrada.toLowerCase().includes('wood') || afterEntrada.includes('🌲');
-                const temStone = afterEntrada.toLowerCase().includes('stone') || afterEntrada.includes('🧱');
-                const temIron = afterEntrada.toLowerCase().includes('iron') || afterEntrada.includes('⚙️');
-
-                let pos = 0;
-                const lerNumero = () => {
-                    if (!numeros[pos]) return 0;
-                    let valor = numeros[pos].replace(/\./g, '');
-                    pos++;
-                    if (numeros[pos] && (numeros[pos].length === 3 || numeros[pos] === '000')) {
-                        valor += numeros[pos];
-                        pos++;
-                    }
-                    return parseInt(valor) || 0;
-                };
-
-                if (temWood) incoming.wood = lerNumero();
-                if (temStone) incoming.stone = lerNumero();
-                if (temIron) incoming.iron = lerNumero();
-            } catch (e) {
-                const entradaMatch = htmlString.match(/Entrada:[\s\S]*?<\/th>/i);
-                if (entradaMatch) {
-                    const blocoEntrada = entradaMatch[0];
-                    const limpo = blocoEntrada.replace(/<span class="grey">\.<\/span>/g, '');
-                    const temWood = blocoEntrada.includes('wood') || blocoEntrada.includes('🌲');
-                    const temStone = blocoEntrada.includes('stone') || blocoEntrada.includes('🧱');
-                    const temIron = blocoEntrada.includes('iron') || blocoEntrada.includes('⚙️');
-                    const numeros = limpo.match(/(\d+(?:\.\d+)?)/g) || [];
-                    let pos = 0;
-                    const lerProximo = () => {
-                        if (!numeros[pos]) return 0;
-                        let valor = numeros[pos].replace(/\./g, '');
-                        pos++;
-                        if (numeros[pos] && (numeros[pos].length === 3 || numeros[pos] === '000')) {
-                            valor += numeros[pos];
-                            pos++;
-                        }
-                        return parseInt(valor) || 0;
-                    };
-                    if (temWood) incoming.wood = lerProximo();
-                    if (temStone) incoming.stone = lerProximo();
-                    if (temIron) incoming.iron = lerProximo();
-                }
-            }
-
-            return incoming;
-        },
-
-        extrairCsrfToken(html) {
+            // 2. Padrões diretos (mesma ordem do v3.8)
             const patterns = [
-                /TribalWars\.updateGameData\(({.*?})\);/s,
                 /var csrf_token = '([a-f0-9]+)'/,
                 /name="h" value="([a-f0-9]+)"/i,
                 /TribalWars\.initTab\('([a-f0-9]+)'\)/,
                 /"csrf":"([a-f0-9]+)"/i
             ];
-
-            for (const pattern of patterns) {
-                if (pattern.toString().includes('updateGameData')) {
-                    const match = html.match(pattern);
-                    if (match) {
-                        try {
-                            const gameData = JSON.parse(match[1]);
-                            if (gameData.csrf) return gameData.csrf;
-                        } catch (e) {}
-                    }
-                } else {
-                    const match = html.match(pattern);
-                    if (match?.[1]) return match[1];
-                }
+            for (const p of patterns) {
+                const m = html.match(p);
+                if (m?.[1]) return m[1];
             }
+
+            // 3. Fallback DOM — aceita qualquer input[name="h"] com valor alfanumérico
+            try {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const el = doc.querySelector('input[name="h"]');
+                if (el?.value) return el.value;
+            } catch(e) {}
+
             return null;
         },
 
-        async obterDadosCompletosAldeia(aldeia) {
-            try {
-                const url = `/game.php?village=${aldeia.id}&screen=market&mode=send`;
-                const response = await fetch(url, { credentials: 'same-origin' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        async obterDetalhesEnvio(aldeiaId) {
+            const url = `/game.php?village=${aldeiaId}&screen=market&mode=send`;
+            const response = await fetch(url, {
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const html = await response.text();
 
-                const html = await response.text();
+            const parse = (regex) => { const m = html.match(regex); return m ? parseInt(m[1].replace(/\./g, '')) : 0; };
 
-                const parse = (regex) => {
-                    const m = html.match(regex);
-                    return m ? parseInt(m[1].replace(/\./g, '')) : 0;
-                };
+            const csrf      = this.extrairCsrfToken(html);
+            const merchants = parse(/market_merchant_available_count[^>]*>(\d+)</) || 99;
+            const woodNow   = parse(/id="wood"[^>]*>([\d\.]+)</)  || 0;
+            const stoneNow  = parse(/id="stone"[^>]*>([\d\.]+)</) || 0;
+            const ironNow   = parse(/id="iron"[^>]*>([\d\.]+)</)  || 0;
 
-                const wood = parse(/id="wood"[^>]*>([\d\.]+)</);
-                const stone = parse(/id="stone"[^>]*>([\d\.]+)</);
-                const iron = parse(/id="iron"[^>]*>([\d\.]+)</);
-                const warehouseCapacity = parse(/id="storage"[^>]*>([\d\.]+)</);
-
-                let merchants = 0;
-                const merchantMatch = html.match(/market_merchant_available_count[^>]*>(\d+)</);
-                if (merchantMatch) merchants = parseInt(merchantMatch[1]) || 0;
-
-                const incoming = this.extrairRecursosEntrada(html);
-                const { wood: woodACaminho, stone: stoneACaminho, iron: ironACaminho } = incoming;
-
-                const csrf = this.extrairCsrfToken(html);
-
-                const recursosAtuais = wood + stone + iron;
-                const recursosACaminho = woodACaminho + stoneACaminho + ironACaminho;
-                const espacoReal = Math.max(0, warehouseCapacity - recursosAtuais - recursosACaminho);
-                const bufferMult = (100 - this.config.bufferPercentual) / 100;
-                const espacoUtilizavel = Math.floor(espacoReal * bufferMult);
-
-                return {
-                    ...aldeia,
-                    wood, stone, iron,
-                    merchants,
-                    warehouseCapacity,
-                    csrf,
-                    woodACaminho, stoneACaminho, ironACaminho,
-                    recursosACaminho: {
-                        wood: woodACaminho,
-                        stone: stoneACaminho,
-                        iron: ironACaminho,
-                        merchants: Math.ceil(recursosACaminho / 1000)
-                    },
-                    espacoReal,
-                    espacoUtilizavel
-                };
-            } catch (err) {
-                console.error(`Erro ao carregar aldeia ${aldeia.id}:`, err);
-                return null;
-            }
+            return { csrf, merchants, woodNow, stoneNow, ironNow };
         },
 
+        // ─────────────────────────────────────────────────────────────────────────
+        // CARREGAR DADOS (único ponto de entrada — substitui o loop de aldeias)
+        // ─────────────────────────────────────────────────────────────────────────
+
         async carregarDados() {
-            if (this.carregando) {
-                this.adicionarLog('⏳ Carregamento já em andamento — aguarde.', 'warning');
-                return;
-            }
-
+            if (this.carregando) { this.adicionarLog('⏳ Carregamento já em andamento.', 'warning'); return; }
             this.carregando = true;
-            this.loadingProgress = 0;
 
-            this.cacheVillages = [];
-
-            const btn = document.getElementById('tw-btn-carregar');
-            const progressBar = document.getElementById('tw-loading-progress');
+            const btn          = document.getElementById('tw-btn-carregar');
+            const progressBar  = document.getElementById('tw-loading-progress');
             const progressWrap = document.getElementById('tw-progress-container');
-            const progressLabel = document.getElementById('tw-progress-label');
+            const progressLabel= document.getElementById('tw-progress-label');
 
             if (btn) { btn.textContent = '⏳ CARREGANDO...'; btn.disabled = true; }
             if (progressWrap) progressWrap.style.display = 'block';
+            if (progressBar) progressBar.style.width = '30%';
+            if (progressLabel) progressLabel.textContent = 'Buscando dados globais...';
 
-            this.adicionarLog('🚀 Iniciando coleta de dados...', 'info');
-            this.adicionarLog(`🛡️ Buffer: ${this.config.bufferPercentual}%`, 'info');
-            this.adicionarLog(`🛡️ Reserva Mínima: ${this.config.reservaMinimaPercentual}% da média`, 'info');
+            this.adicionarLog('🚀 Iniciando extração global (1 fetch)...', 'info');
 
-            const aldeias = await this.obterTodasAldeias(true);
-            const total = aldeias.length;
+            try {
+                const aldeias = await this.extrairDadosGlobais();
 
-            if (total === 0) {
-                this.adicionarLog('❌ Nenhuma aldeia encontrada. Verifique se você está logado.', 'error');
-                this.carregando = false;
-                if (btn) { btn.textContent = '🔄 CARREGAR DADOS'; btn.disabled = false; }
-                if (progressWrap) progressWrap.style.display = 'none';
-                return;
-            }
-
-            this.adicionarLog(`📋 ${total} aldeia(s) encontrada(s). Iniciando coleta detalhada...`, 'info');
-
-            const novosDados = [];
-            const BATCH_SIZE = 2;
-
-            for (let i = 0; i < total; i += BATCH_SIZE) {
-                const batch = aldeias.slice(i, i + BATCH_SIZE);
-                const resultados = await Promise.all(batch.map(a => this.obterDadosCompletosAldeia(a)));
-
-                for (const r of resultados) {
-                    if (!r) continue;
-                    novosDados.push(r);
+                if (aldeias.length === 0) {
+                    this.adicionarLog('❌ Nenhuma aldeia encontrada. Verifique se você está logado.', 'error');
+                    return;
                 }
 
-                const pct = Math.min(100, Math.floor((i + BATCH_SIZE) / total * 100));
-                this.loadingProgress = pct;
-                if (progressBar) { progressBar.style.width = `${pct}%`; }
-                if (progressLabel) progressLabel.textContent = `${pct}% (${Math.min(i + BATCH_SIZE, total)}/${total})`;
+                if (progressBar) progressBar.style.width = '100%';
+                if (progressLabel) progressLabel.textContent = `${aldeias.length} aldeias carregadas!`;
 
-                await this.delay(this.config.delayEntreLotes);
-            }
+                this.villagesData = aldeias;
+                this.calcularEstatisticas();
+                this.atualizarResumo();
+                this.renderizarTabela();
 
-            if (novosDados.length === 0) {
-                this.adicionarLog('❌ Falha ao carregar dados das aldeias.', 'error');
+                this.adicionarLog(`✅ ${aldeias.length} aldeias carregadas com sucesso!`, 'success');
+                this.adicionarLog(`📊 Média de pontos: ${Math.floor(this.mediaPontos).toLocaleString()} pts`, 'info');
+                this.adicionarLog(`🌲 Médias: 🌲${this.mediaWood.toLocaleString()} 🧱${this.mediaStone.toLocaleString()} ⚙️${this.mediaIron.toLocaleString()}`, 'info');
+                this.adicionarLog(`🛡️ Estoque de segurança doadora: ${this.config.estoqueSegurancaDoadora.toLocaleString()}`, 'info');
+                this.adicionarLog(`📦 Limite por comando: ${this.config.limiteEnvioPorComando.toLocaleString()} (conta ${this.premiumAtivo ? 'Premium' : 'Básica'})`, 'info');
+
+            } catch (err) {
+                this.adicionarLog(`❌ Erro na extração global: ${err.message}`, 'error');
+                console.error(err);
+            } finally {
                 this.carregando = false;
                 if (btn) { btn.textContent = '🔄 CARREGAR DADOS'; btn.disabled = false; }
-                if (progressWrap) progressWrap.style.display = 'none';
-                return;
+                if (progressWrap) setTimeout(() => {
+                    progressWrap.style.display = 'none';
+                    if (progressBar) progressBar.style.width = '0%';
+                    if (progressLabel) progressLabel.textContent = '0%';
+                }, 2000);
             }
-
-            this.villagesData = novosDados;
-            this.calcularMedias();
-            this.atualizarResumo();
-            this.renderizarTabela();
-
-            const totalACGlobal = this.villagesData.reduce(
-                (s, v) => s + v.woodACaminho + v.stoneACaminho + v.ironACaminho, 0
-            );
-
-            this.adicionarLog(`✅ ${this.villagesData.length} aldeias carregadas com sucesso!`, 'success');
-            this.adicionarLog(`📊 Médias: 🌲${this.mediaWood.toLocaleString()} 🧱${this.mediaStone.toLocaleString()} ⚙️${this.mediaIron.toLocaleString()}`, 'info');
-
-            if (totalACGlobal > 0) {
-                this.adicionarLog(`🚚 Total de recursos a caminho: ${totalACGlobal.toLocaleString()}`, 'info');
-            }
-
-            if (progressWrap) setTimeout(() => {
-                progressWrap.style.display = 'none';
-                if (progressBar) progressBar.style.width = '0%';
-                if (progressLabel) progressLabel.textContent = '0%';
-            }, 2000);
-
-            if (btn) { btn.textContent = '🔄 CARREGAR DADOS'; btn.disabled = false; }
-            this.carregando = false;
         },
 
-        calcularMedias() {
+        // ─────────────────────────────────────────────────────────────────────────
+        // ESTATÍSTICAS
+        // ─────────────────────────────────────────────────────────────────────────
+
+        calcularEstatisticas() {
             const n = this.villagesData.length;
             if (n === 0) return;
 
-            this.totalWood = this.villagesData.reduce((s, v) => s + v.wood, 0);
+            this.totalWood  = this.villagesData.reduce((s, v) => s + v.wood, 0);
             this.totalStone = this.villagesData.reduce((s, v) => s + v.stone, 0);
-            this.totalIron = this.villagesData.reduce((s, v) => s + v.iron, 0);
-
-            this.mediaWood = Math.floor(this.totalWood / n);
+            this.totalIron  = this.villagesData.reduce((s, v) => s + v.iron, 0);
+            this.mediaWood  = Math.floor(this.totalWood / n);
             this.mediaStone = Math.floor(this.totalStone / n);
-            this.mediaIron = Math.floor(this.totalIron / n);
+            this.mediaIron  = Math.floor(this.totalIron / n);
+
+            const totalPontos = this.villagesData.reduce((s, v) => s + v.pontos, 0);
+            this.mediaPontos  = totalPontos / n;
         },
 
         atualizarResumo() {
@@ -569,189 +359,171 @@
                 'tw-total-iron': this.totalIron,
                 'tw-media-wood': this.mediaWood,
                 'tw-media-stone': this.mediaStone,
-                'tw-media-iron': this.mediaIron
+                'tw-media-iron': this.mediaIron,
+                'tw-media-pontos': Math.floor(this.mediaPontos)
             };
             for (const [id, val] of Object.entries(mapa)) {
                 const el = document.getElementById(id);
                 if (el) el.textContent = val.toLocaleString();
             }
+            // Badge Premium/Básico
+            const badge = document.getElementById('tw-premium-badge');
+            if (badge) {
+                badge.textContent = this.premiumAtivo ? '⭐ Premium' : '📋 Básica';
+                badge.style.color = this.premiumAtivo ? this.CORES.aviso : this.CORES.textoDim;
+            }
         },
 
-        // ─────────────────────────────────────────────────────────────
-        // BALANCEAMENTO COM GREEDY + RESERVA MÍNIMA + MARCAÇÃO
-        // ✅ BUG CORRIGIDO: linha 606 agora usa melhorSugestao.destino.id
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
+        // LÓGICA DE CRESCIMENTO ACELERADO (regra por pontos)
+        // Doadoras: acima da média de pontos → enviam recursos parados
+        // Receptoras: abaixo da média de pontos → recebem, priorizando as menores
+        // Limite por comando: 10.000 unidades (conta básica)
+        // Segurança doadora: 30.000 de reserva por recurso
+        // Receptora: não ultrapassa 90% do armazém
+        // ─────────────────────────────────────────────────────────────────────────
 
         getSugestoesBalanceamento() {
             this.usedOriginsInCycle.clear();
             this.usedDestinationsInCycle.clear();
 
-            const tolerancia = this.config.toleranciaPercentual / 100;
-            const minEnvio = this.config.minEnvio;
-            const reservaFactor = this.config.reservaMinimaPercentual / 100;
+            const seguranca  = this.config.estoqueSegurancaDoadora;
+            const limiteCmd  = this.config.limiteEnvioPorComando;
+            const minIndiv   = this.config.minEnvioIndividual;
+            const pctArm     = this.config.limiteArmazemReceptora / 100;
 
-            const safeMinWood = this.mediaWood * reservaFactor;
-            const safeMinStone = this.mediaStone * reservaFactor;
-            const safeMinIron = this.mediaIron * reservaFactor;
+            // Classificação por pontos em relação à média
+            const doadoras   = this.villagesData
+                .filter(a => a.pontos >= this.mediaPontos)
+                .sort((a, b) => b.pontos - a.pontos);   // Maior para menor (mais recursos a ofertar)
 
-            const doadoras = [];
-            const receptoras = [];
-
-            for (const v of this.villagesData) {
-                const dW = v.wood - this.mediaWood;
-                const dS = v.stone - this.mediaStone;
-                const dI = v.iron - this.mediaIron;
-
-                const temExcesso = (dW > this.mediaWood * tolerancia && dW > minEnvio) ||
-                                  (dS > this.mediaStone * tolerancia && dS > minEnvio) ||
-                                  (dI > this.mediaIron * tolerancia && dI > minEnvio);
-
-                const temFalta = dW < -this.mediaWood * tolerancia ||
-                                dS < -this.mediaStone * tolerancia ||
-                                dI < -this.mediaIron * tolerancia;
-
-                if (temExcesso) doadoras.push(v);
-                else if (temFalta) receptoras.push(v);
-            }
-
-            doadoras.sort((a, b) => {
-                const excessoA = (a.wood - this.mediaWood) + (a.stone - this.mediaStone) + (a.iron - this.mediaIron);
-                const excessoB = (b.wood - this.mediaWood) + (b.stone - this.mediaStone) + (b.iron - this.mediaIron);
-                return excessoB - excessoA;
-            });
-
-            receptoras.sort((a, b) => {
-                const faltaA = (this.mediaWood - a.wood) + (this.mediaStone - a.stone) + (this.mediaIron - a.iron);
-                const faltaB = (this.mediaWood - b.wood) + (this.mediaStone - b.stone) + (this.mediaIron - b.iron);
-                return faltaB - faltaA;
-            });
+            const receptoras = this.villagesData
+                .filter(a => a.pontos < this.mediaPontos)
+                .sort((a, b) => a.pontos - b.pontos);   // Menor para maior (prioridade máxima)
 
             const sugestoes = [];
 
-            for (const origem of doadoras) {
-                if (this.usedOriginsInCycle.has(origem.id)) continue;
+            for (const doadora of doadoras) {
+                if (this.usedOriginsInCycle.has(doadora.id)) continue;
 
-                const maxEnvioWood = Math.max(0, origem.wood - safeMinWood);
-                const maxEnvioStone = Math.max(0, origem.stone - safeMinStone);
-                const maxEnvioIron = Math.max(0, origem.iron - safeMinIron);
-                const totalDisponivelSeguro = maxEnvioWood + maxEnvioStone + maxEnvioIron;
+                for (const receptora of receptoras) {
+                    if (this.usedDestinationsInCycle.has(receptora.id)) continue;
+                    if (doadora.id === receptora.id) continue;
 
-                if (totalDisponivelSeguro < minEnvio) continue;
+                    const limiteArm = Math.floor(receptora.warehouseCapacity * pctArm);
 
-                let melhorSugestao = null;
-                let melhorPontuacao = -Infinity;
+                    // Calcula disponível e espaço livre para cada recurso
+                    const calcEnvio = (disponivel, atual) => {
+                        const disp = Math.max(0, disponivel - seguranca);
+                        const espaco = Math.max(0, limiteArm - atual);
+                        const qtd = Math.min(disp, espaco, limiteCmd);
+                        return qtd >= minIndiv ? Math.floor(qtd) : 0;
+                    };
 
-                for (const destino of receptoras) {
-                    if (this.usedDestinationsInCycle.has(destino.id)) continue;
-                    if (origem.id === destino.id) continue;
+                    const enviarWood  = calcEnvio(doadora.wood,  receptora.wood);
+                    const enviarStone = calcEnvio(doadora.stone, receptora.stone);
+                    const enviarIron  = calcEnvio(doadora.iron,  receptora.iron);
 
-                    let wood = Math.min(maxEnvioWood, Math.max(0, this.mediaWood - destino.wood));
-                    let stone = Math.min(maxEnvioStone, Math.max(0, this.mediaStone - destino.stone));
-                    let iron = Math.min(maxEnvioIron, Math.max(0, this.mediaIron - destino.iron));
+                    const totalEnvio = enviarWood + enviarStone + enviarIron;
+                    if (totalEnvio < minIndiv) continue;
 
-                    wood = Math.floor(wood / 1000) * 1000;
-                    stone = Math.floor(stone / 1000) * 1000;
-                    iron = Math.floor(iron / 1000) * 1000;
+                    // Limita o total do comando a 10.000 (conta básica)
+                    // Se a soma ultrapassar, escala proporcionalmente
+                    let wood = enviarWood, stone = enviarStone, iron = enviarIron;
+                    if (totalEnvio > limiteCmd) {
+                        const fator = limiteCmd / totalEnvio;
+                        wood  = Math.floor(wood  * fator);
+                        stone = Math.floor(stone * fator);
+                        iron  = Math.floor(iron  * fator);
+                    }
 
                     const total = wood + stone + iron;
-                    if (total < minEnvio) continue;
+                    if (total < minIndiv) continue;
 
                     const merchantsNeeded = Math.ceil(total / 1000);
-                    if (origem.merchants < merchantsNeeded) continue;
-                    if (destino.espacoUtilizavel < total) continue;
 
-                    const eficiencia = total / merchantsNeeded;
-                    const urgenciaDestino = (this.mediaWood - destino.wood) +
-                                           (this.mediaStone - destino.stone) +
-                                           (this.mediaIron - destino.iron);
+                    sugestoes.push({
+                        origem: doadora,
+                        destino: receptora,
+                        wood, stone, iron,
+                        total,
+                        merchantsNeeded,
+                        // Informações de contexto para o dashboard
+                        pontosOrigem: doadora.pontos,
+                        pontosDestino: receptora.pontos
+                    });
 
-                    const pontuacao = (total * 2) + (urgenciaDestino * 1.5) + (eficiencia * 0.5);
+                    this.usedOriginsInCycle.add(doadora.id);
+                    this.usedDestinationsInCycle.add(receptora.id);
 
-                    if (pontuacao > melhorPontuacao) {
-                        melhorPontuacao = pontuacao;
-                        melhorSugestao = { origem, destino, wood, stone, iron, total, merchantsNeeded };
-                    }
-                }
+                    // Simula o envio para evitar dupla sugestão inconsistente
+                    doadora.wood  -= wood;
+                    doadora.stone -= stone;
+                    doadora.iron  -= iron;
+                    receptora.wood  += wood;
+                    receptora.stone += stone;
+                    receptora.iron  += iron;
 
-                if (melhorSugestao) {
-                    sugestoes.push(melhorSugestao);
-                    this.usedOriginsInCycle.add(origem.id);
-                    // ✅ BUG CORRIGIDO AQUI: usando melhorSugestao.destino.id
-                    this.usedDestinationsInCycle.add(melhorSugestao.destino.id);
+                    break; // Cada doadora emparelha com 1 receptora por ciclo
                 }
             }
 
             return sugestoes;
         },
 
-        // ─────────────────────────────────────────────────────────────
-        // ENVIO EM DUAS ETAPAS
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
+        // ENVIO EM DUAS ETAPAS (simulação + confirmação)
+        // ─────────────────────────────────────────────────────────────────────────
 
         async enviarRecursos(origemId, destinoId, wood, stone, iron, botaoElement) {
-            if (this.enviando) {
-                this.adicionarLog('⏳ Já há um envio em andamento — aguarde.', 'warning');
-                return;
-            }
+            if (this.enviando) { this.adicionarLog('⏳ Já há um envio em andamento.', 'warning'); return; }
 
-            const origem = this.villagesData.find(v => v.id === origemId);
+            const origem  = this.villagesData.find(v => v.id === origemId);
             const destino = this.villagesData.find(v => v.id === destinoId);
-
-            if (!origem || !destino) {
-                this.adicionarLog('❌ Erro interno: aldeia não encontrada.', 'error');
-                return;
-            }
-            if (!origem.csrf) {
-                this.adicionarLog(`❌ ${origem.nome}: token CSRF ausente. Recarregue os dados.`, 'error');
-                return;
-            }
-
-            const totalRecursos = wood + stone + iron;
-            const merchantsNeeded = Math.ceil(totalRecursos / 1000);
-
-            const reservaFactor = this.config.reservaMinimaPercentual / 100;
-            const reservaMinWood = this.mediaWood * reservaFactor;
-            const reservaMinStone = this.mediaStone * reservaFactor;
-            const reservaMinIron = this.mediaIron * reservaFactor;
-
-            if (origem.wood - wood < reservaMinWood) {
-                this.adicionarLog(`❌ ${origem.nome}: Envio cancelado - madeira ficaria abaixo da reserva mínima.`, 'error');
-                return;
-            }
-            if (origem.stone - stone < reservaMinStone) {
-                this.adicionarLog(`❌ ${origem.nome}: Envio cancelado - pedra ficaria abaixo da reserva mínima.`, 'error');
-                return;
-            }
-            if (origem.iron - iron < reservaMinIron) {
-                this.adicionarLog(`❌ ${origem.nome}: Envio cancelado - ferro ficaria abaixo da reserva mínima.`, 'error');
-                return;
-            }
-
-            if (origem.merchants < merchantsNeeded) {
-                this.adicionarLog(`⚠️ ${origem.nome}: comerciantes insuficientes (${origem.merchants}/${merchantsNeeded}).`, 'warning');
-                return;
-            }
-            if (destino.espacoUtilizavel < totalRecursos) {
-                this.adicionarLog(`⚠️ ${destino.nome}: espaço insuficiente com buffer.`, 'warning');
-                return;
-            }
+            if (!origem || !destino) { this.adicionarLog('❌ Aldeia não encontrada internamente.', 'error'); return; }
 
             this.enviando = true;
-            if (botaoElement) { botaoElement.disabled = true; botaoElement.textContent = '⏳ Simulando…'; }
+            if (botaoElement) { botaoElement.disabled = true; botaoElement.textContent = '⏳ Verificando…'; }
 
             try {
+                // Obtém CSRF e mercadores em tempo real
+                this.adicionarLog(`🔍 Obtendo detalhes de envio de ${origem.nome}...`, 'info');
+                const detalhes = await this.obterDetalhesEnvio(origemId);
+
+                if (!detalhes.csrf) {
+                    this.adicionarLog(`❌ ${origem.nome}: token CSRF não encontrado. Verifique o console (F12) — procure por "[CSRF DEBUG]" para ver os campos disponíveis e reporte ao desenvolvedor.`, 'error');
+                    return;
+                }
+
+                const totalRecursos = wood + stone + iron;
+                const merchantsNeeded = Math.ceil(totalRecursos / 1000);
+
+                if (detalhes.merchants < merchantsNeeded) {
+                    this.adicionarLog(`⚠️ ${origem.nome}: comerciantes insuficientes (${detalhes.merchants} disponíveis, ${merchantsNeeded} necessários).`, 'warning');
+                    return;
+                }
+
+                // Valida reserva de segurança com dados em tempo real
+                const seg = this.config.estoqueSegurancaDoadora;
+                if (detalhes.woodNow - wood < seg || detalhes.stoneNow - stone < seg || detalhes.ironNow - iron < seg) {
+                    this.adicionarLog(`❌ ${origem.nome}: envio violaria o estoque de segurança de ${seg.toLocaleString()}. Recarregue os dados.`, 'error');
+                    return;
+                }
+
+                if (botaoElement) botaoElement.textContent = '⏳ Simulando…';
                 this.adicionarLog(`📤 [1/2] Simulando: 🌲${wood.toLocaleString()} 🧱${stone.toLocaleString()} ⚙️${iron.toLocaleString()} — ${origem.nome} → ${destino.nome}`, 'info');
 
+                // Etapa 1: Simular — idêntico ao v3.8 (com X-Requested-With)
                 const urlSim = `/game.php?village=${origemId}&screen=market&mode=send&try=confirm_send`;
+                const [destX, destY] = destino.coord.split('|');
                 const bodySim = new URLSearchParams({
                     wood, stone, iron,
                     target_id: destinoId,
-                    h: origem.csrf,
-                    x: destino.coord.split('|')[0],
-                    y: destino.coord.split('|')[1]
+                    h: detalhes.csrf,
+                    x: destX, y: destY
                 });
 
-                const resSim = await fetch(urlSim, {
+                const respSim = await fetch(urlSim, {
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {
@@ -761,37 +533,41 @@
                     body: bodySim.toString()
                 });
 
-                if (!resSim.ok) throw new Error(`HTTP ${resSim.status} na simulação`);
+                if (!respSim.ok) throw new Error(`HTTP ${respSim.status} na simulação`);
+                const htmlSim = await respSim.text();
 
-                const htmlSim = await resSim.text();
-                const novoCsrf = this.extrairCsrfToken(htmlSim);
-                if (!novoCsrf) throw new Error('Token CSRF de confirmação não encontrado');
+                // Extrai CSRF da página de confirmação (mesmo método do v3.8)
+                const csrfConfirm = this.extrairCsrfToken(htmlSim);
 
-                const lerCampo = (regex, fallback) => {
-                    const m = htmlSim.match(regex);
-                    return m ? parseInt(m[1]) : fallback;
-                };
+                if (!csrfConfirm) {
+                    console.error('[CSRF-CONFIRM] HTML de confirmação (800 chars):', htmlSim.substring(0, 800));
+                    this.adicionarLog(`❌ Página de confirmação sem CSRF — verifique o console (F12).`, 'error');
+                    return;
+                }
 
-                const woodFinal = lerCampo(/name="wood"\s+value="(\d+)"/i, wood);
+                // Extrai quantidades e target_id da página de confirmação (igual ao v3.8)
+                const lerCampo = (regex, fallback) => { const m = htmlSim.match(regex); return m ? parseInt(m[1]) : fallback; };
+                const woodFinal  = lerCampo(/name="wood"\s+value="(\d+)"/i,  wood);
                 const stoneFinal = lerCampo(/name="stone"\s+value="(\d+)"/i, stone);
-                const ironFinal = lerCampo(/name="iron"\s+value="(\d+)"/i, iron);
-                let targetId = destinoId;
-                const tidMatch = htmlSim.match(/name="target_id"\s+value="(\d+)"/i);
-                if (tidMatch) targetId = tidMatch[1];
+                const ironFinal  = lerCampo(/name="iron"\s+value="(\d+)"/i,  iron);
+                const tidMatch   = htmlSim.match(/name="target_id"\s+value="(\d+)"/i);
+                const targetId   = tidMatch ? tidMatch[1] : destinoId;
+                const totalFinal = woodFinal + stoneFinal + ironFinal;
 
                 if (botaoElement) botaoElement.textContent = '⏳ Confirmando…';
                 this.adicionarLog('📤 [2/2] Confirmando envio…', 'info');
 
+                // Etapa 2: Confirmar — URL action=send (igual ao v3.8, sem x/y)
                 const urlConf = `/game.php?village=${origemId}&screen=market&action=send`;
                 const bodyConf = new URLSearchParams({
                     target_id: targetId,
                     wood: woodFinal,
                     stone: stoneFinal,
                     iron: ironFinal,
-                    h: novoCsrf
+                    h: csrfConfirm
                 });
 
-                const resConf = await fetch(urlConf, {
+                const respConf = await fetch(urlConf, {
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {
@@ -801,119 +577,115 @@
                     body: bodyConf.toString()
                 });
 
-                const textoConf = await resConf.text();
-                const totalFinal = woodFinal + stoneFinal + ironFinal;
+                if (!respConf.ok) throw new Error(`HTTP ${respConf.status} na confirmação`);
+                const htmlConf = await respConf.text();
 
-                const sucessoEspecifico = textoConf.includes('foram enviados') ||
-                                         textoConf.includes('sucesso') ||
-                                         textoConf.includes('Enviado com sucesso');
-                const sucessoGenerico = textoConf.includes('success') && !textoConf.includes('error');
-                const sucesso = sucessoEspecifico || sucessoGenerico;
-                const falhaConhecida = textoConf.includes('error') || textoConf.includes('insuficiente');
+                // Detecção de resultado — igual ao v3.8 mas com prioridade invertida:
+                // verifica falha explícita primeiro, trata o resto como sucesso
+                const falhaConhecida = htmlConf.includes('insuficiente') ||
+                                       htmlConf.includes('Você não possui recursos suficientes') ||
+                                       htmlConf.includes('not enough') ||
+                                       htmlConf.includes('zu wenig');
+                // O jogo redireciona de volta para o mercado após envio bem-sucedido
+                // e a palavra "error" aparece em classes CSS mesmo em páginas de sucesso — ignoramos ela
+                const sucessoEspecifico = htmlConf.includes('foram enviados') ||
+                                          htmlConf.includes('Enviado com sucesso') ||
+                                          htmlConf.includes('sucesso');
+                const sucesso = !falhaConhecida && (sucessoEspecifico || htmlConf.includes('screen=market') || htmlConf.includes('market'));
 
                 if (sucesso) {
                     this.adicionarLog(`✅ SUCESSO: ${merchantsNeeded} comerciante(s) | ${totalFinal.toLocaleString()} recursos | ${origem.nome} → ${destino.nome}`, 'success');
 
-                    origem.wood -= woodFinal;
-                    origem.stone -= stoneFinal;
-                    origem.iron -= ironFinal;
-                    origem.merchants -= merchantsNeeded;
+                    // Atualiza estado local
+                    origem.wood  -= woodFinal;  origem.stone -= stoneFinal; origem.iron -= ironFinal;
+                    destino.wood += woodFinal;  destino.stone += stoneFinal; destino.iron += ironFinal;
 
-                    destino.wood += woodFinal;
-                    destino.stone += stoneFinal;
-                    destino.iron += ironFinal;
+                    // Recalcula espaço utilizável da receptora
+                    const limiteArm = Math.floor(destino.warehouseCapacity * (this.config.limiteArmazemReceptora / 100));
+                    destino.espacoUtilizavel = Math.max(0, limiteArm - destino.wood - destino.stone - destino.iron);
 
-                    const recAtDest = destino.wood + destino.stone + destino.iron;
-                    const recACDest = destino.woodACaminho + destino.stoneACaminho + destino.ironACaminho;
-                    destino.espacoReal = Math.max(0, destino.warehouseCapacity - recAtDest - recACDest);
-                    destino.espacoUtilizavel = Math.floor(destino.espacoReal * ((100 - this.config.bufferPercentual) / 100));
-
-                    const recAtOrig = origem.wood + origem.stone + origem.iron;
-                    const recACOrig = origem.woodACaminho + origem.stoneACaminho + origem.ironACaminho;
-                    origem.espacoReal = Math.max(0, origem.warehouseCapacity - recAtOrig - recACOrig);
-                    origem.espacoUtilizavel = Math.floor(origem.espacoReal * ((100 - this.config.bufferPercentual) / 100));
-
-                    this.calcularMedias();
+                    this.calcularEstatisticas();
                     this.atualizarResumo();
                     this.renderizarTabela();
                 } else if (falhaConhecida) {
-                    this.adicionarLog(`❌ Falha: recursos insuficientes — ${origem.nome} → ${destino.nome}`, 'error');
+                    this.adicionarLog(`❌ Falha: recursos insuficientes no jogo — ${origem.nome}`, 'error');
                 } else {
                     this.adicionarLog(`❌ Resposta inesperada do servidor — ${origem.nome} → ${destino.nome}`, 'error');
                 }
 
             } catch (err) {
                 this.adicionarLog(`❌ Erro no envio: ${err.message}`, 'error');
+                console.error(err);
             } finally {
                 this.enviando = false;
-                if (botaoElement) {
-                    setTimeout(() => {
-                        botaoElement.disabled = false;
-                        botaoElement.textContent = '📦 ENVIAR';
-                    }, 1500);
-                }
+                if (botaoElement) setTimeout(() => { botaoElement.disabled = false; botaoElement.textContent = '📦 ENVIAR'; }, 1500);
             }
         },
 
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
         // RENDERIZAÇÃO DA TABELA
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
 
         renderizarTabela() {
             const tbody = document.getElementById('tw-lista-aldeias');
             if (!tbody) return;
 
             if (this.villagesData.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:${this.CORES.textoDim}; padding:32px 0;">Nenhum dado carregado. Clique em <strong style="color:${this.CORES.verde};">CARREGAR DADOS</strong> para iniciar.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:${this.CORES.textoDim};padding:40px 0;">Clique em <strong style="color:${this.CORES.verde};">CARREGAR DADOS</strong> para iniciar.</td></tr>`;
                 return;
             }
 
+            // Clona o array antes de gerar sugestões para não mutar o original
+            const snapshot = JSON.parse(JSON.stringify(this.villagesData));
             const sugestoes = this.getSugestoesBalanceamento();
+            // Restaura o original após o cálculo (getSugestoes muta para consistência interna)
+            this.villagesData = snapshot;
 
             if (!sugestoes || sugestoes.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:${this.CORES.verde}; font-weight:bold;">Todas as aldeias estão balanceadas!</span><br><span style="font-size:10px; color:${this.CORES.textoDim};">Reserva: ${this.config.reservaMinimaPercentual}% | Tolerância: ${this.config.toleranciaPercentual}% | Mínimo: ${this.config.minEnvio.toLocaleString()}</span></td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:${this.CORES.verde};font-weight:bold;">Todas as aldeias estão em equilíbrio!</span><br><span style="font-size:10px;color:${this.CORES.textoDim};">Segurança doadora: ${this.config.estoqueSegurancaDoadora.toLocaleString()} | Limite/cmd: ${this.config.limiteEnvioPorComando.toLocaleString()}</span></td></tr>`;
+                const countEl = document.getElementById('tw-sugestoes-count');
+                if (countEl) countEl.textContent = 'Nenhuma sugestão';
                 return;
             }
 
+            const C = this.CORES;
             let html = '';
+
             for (const s of sugestoes) {
                 const { origem, destino } = s;
-                const pct = origem.warehouseCapacity > 0 ? Math.min(100, (origem.wood / origem.warehouseCapacity) * 100) : 0;
+                const pctArm = origem.warehouseCapacity > 0
+                    ? Math.min(100, ((origem.wood + origem.stone + origem.iron) / origem.warehouseCapacity) * 100)
+                    : 0;
 
                 const chips = [];
-                if (s.wood > 0) chips.push(`<span class="tw-res-chip tw-chip-wood">🌲 ${s.wood.toLocaleString()}</span>`);
+                if (s.wood  > 0) chips.push(`<span class="tw-res-chip tw-chip-wood">🌲 ${s.wood.toLocaleString()}</span>`);
                 if (s.stone > 0) chips.push(`<span class="tw-res-chip tw-chip-stone">🧱 ${s.stone.toLocaleString()}</span>`);
-                if (s.iron > 0) chips.push(`<span class="tw-res-chip tw-chip-iron">⚙️ ${s.iron.toLocaleString()}</span>`);
+                if (s.iron  > 0) chips.push(`<span class="tw-res-chip tw-chip-iron">⚙️ ${s.iron.toLocaleString()}</span>`);
 
-                const aCaminhoTotal = destino.woodACaminho + destino.stoneACaminho + destino.ironACaminho;
-                let aCaminhoTag = '';
-                if (aCaminhoTotal > 0) {
-                    const partes = [];
-                    if (destino.woodACaminho > 0) partes.push(`${destino.woodACaminho.toLocaleString()} 🌲`);
-                    if (destino.stoneACaminho > 0) partes.push(`${destino.stoneACaminho.toLocaleString()} 🧱`);
-                    if (destino.ironACaminho > 0) partes.push(`${destino.ironACaminho.toLocaleString()} ⚙️`);
-                    aCaminhoTag = `<div class="tw-incoming-badge">🚚 ${partes.join(' ')} a caminho</div>`;
-                }
+                // Badge de pontos — destaca a diferença
+                const difPontos = origem.pontos - destino.pontos;
+                const difLabel = difPontos > 0 ? `+${difPontos.toLocaleString()} pts acima` : `${difPontos.toLocaleString()} pts`;
 
                 html += `
                     <tr class="tw-row">
                         <td class="tw-td-origin">
                             <div class="tw-village-name">${origem.nome}</div>
                             <div class="tw-village-coord">${origem.coord}</div>
-                            <div class="tw-village-meta">📦 ${origem.merchants} comerciante(s)</div>
-                            <div class="tw-fill-bar"><div class="tw-fill-inner" style="width:${pct.toFixed(1)}%"></div></div>
+                            <div class="tw-village-pts" style="font-size:10px;color:${C.pontos};margin-top:2px;">🏅 ${origem.pontos.toLocaleString()} pts (DOADORA)</div>
+                            <div class="tw-fill-bar"><div class="tw-fill-inner" style="width:${pctArm.toFixed(1)}%"></div></div>
                             <div class="tw-village-res">🌲${origem.wood.toLocaleString()} 🧱${origem.stone.toLocaleString()} ⚙️${origem.iron.toLocaleString()}</div>
                         </td>
                         <td class="tw-td-dest">
                             <div class="tw-village-name">${destino.nome}</div>
                             <div class="tw-village-coord">${destino.coord}</div>
-                            <div class="tw-village-meta">🏚️ ${destino.espacoUtilizavel.toLocaleString()} livre (com buffer)</div>
-                            ${aCaminhoTag}
+                            <div class="tw-village-pts" style="font-size:10px;color:${C.aviso};margin-top:2px;">📈 ${destino.pontos.toLocaleString()} pts (RECEPTORA)</div>
+                            <div style="font-size:9px;color:${C.textoDim};margin-top:2px;">↕ Diferença: ${difLabel}</div>
                             <div class="tw-village-res">🌲${destino.wood.toLocaleString()} 🧱${destino.stone.toLocaleString()} ⚙️${destino.iron.toLocaleString()}</div>
+                            <div style="font-size:9px;color:${C.textoDim};margin-top:3px;">🏚️ ${destino.espacoUtilizavel.toLocaleString()} livre (≤${this.config.limiteArmazemReceptora}% armazém)</div>
                         </td>
                         <td class="tw-td-suggest">
                             <div class="tw-chips">${chips.join('')}</div>
-                            <div class="tw-merchant-count">🚚 ${s.merchantsNeeded} comerciante(s) · 📦 ${s.total.toLocaleString()}</div>
+                            <div class="tw-merchant-count">🚚 ${s.merchantsNeeded} comerciante(s) · 📦 ${s.total.toLocaleString()} (limite ${this.config.limiteEnvioPorComando.toLocaleString()})</div>
                         </td>
                         <td class="tw-td-action">
                             <button class="tw-send-btn" onclick="TWResourceBalancer.enviarRecursos(${origem.id}, ${destino.id}, ${s.wood}, ${s.stone}, ${s.iron}, this)">📦 ENVIAR</button>
@@ -925,12 +697,12 @@
             tbody.innerHTML = html;
 
             const countEl = document.getElementById('tw-sugestoes-count');
-            if (countEl) countEl.textContent = `${sugestoes.length} sugestão(ões) (1 por origem/destino)`;
+            if (countEl) countEl.textContent = `${sugestoes.length} sugestão(ões) — Crescimento Acelerado por Pontos`;
         },
 
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
         // RENDERIZAÇÃO DO DASHBOARD
-        // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────────────────
 
         renderizarDashboard() {
             document.body.innerHTML = '';
@@ -938,14 +710,7 @@
 
             const C = this.CORES;
 
-            document.body.style.cssText = `
-                background: ${C.fundo};
-                margin: 0;
-                padding: 0;
-                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-                color: ${C.texto};
-                min-height: 100vh;
-            `;
+            document.body.style.cssText = `background:${C.fundo};margin:0;padding:0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:${C.texto};min-height:100vh;`;
 
             document.body.innerHTML = `
                 <style>
@@ -959,12 +724,12 @@
                     #tw-header { background: ${C.fundoCard}; border-bottom: 1px solid ${C.borda}; padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
                     #tw-header h1 { margin: 0; font-size: 15px; font-weight: 700; color: ${C.verde}; letter-spacing: 0.03em; }
                     #tw-header h1 span { color: ${C.textoDim}; font-weight: 400; font-size: 12px; }
-                    #tw-header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+                    #tw-header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 11px; }
 
                     #tw-config-bar { background: ${C.fundoCard}; border-bottom: 1px solid ${C.borda}; padding: 8px 20px; display: flex; align-items: center; gap: 24px; flex-shrink: 0; flex-wrap: wrap; }
                     .tw-config-group { display: flex; align-items: center; gap: 7px; font-size: 11px; color: ${C.textoDim}; }
                     .tw-config-group label { white-space: nowrap; }
-                    .tw-config-group input[type=number] { width: 60px; background: ${C.fundo}; color: ${C.texto}; border: 1px solid ${C.borda}; border-radius: 4px; padding: 3px 6px; font-size: 11px; outline: none; }
+                    .tw-config-group input[type=number] { width: 75px; background: ${C.fundo}; color: ${C.texto}; border: 1px solid ${C.borda}; border-radius: 4px; padding: 3px 6px; font-size: 11px; outline: none; }
                     .tw-config-group input[type=number]:focus { border-color: ${C.verde}66; }
 
                     #tw-stats-strip { display: flex; gap: 12px; padding: 10px 20px; background: ${C.fundo}; border-bottom: 1px solid ${C.borda}; flex-shrink: 0; flex-wrap: wrap; }
@@ -973,13 +738,14 @@
                     .tw-stat-card-body { font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
                     .tw-res-val { color: ${C.texto}; }
                     .tw-res-val b { color: ${C.verde}; }
+                    .tw-pts-val b { color: ${C.pontos}; }
 
                     #tw-progress-container { padding: 0 20px 8px; display: none; flex-shrink: 0; }
                     #tw-progress-track { background: ${C.fundoCard}; border: 1px solid ${C.borda}; border-radius: 6px; height: 22px; overflow: hidden; position: relative; }
                     #tw-loading-progress { height: 100%; width: 0%; background: linear-gradient(90deg, ${C.verdeEscuro}, ${C.verde}); transition: width 0.35s ease; border-radius: 6px; }
                     #tw-progress-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 10px; font-family: monospace; color: ${C.texto}; pointer-events: none; }
 
-                    #tw-main { display: flex; flex: 1; overflow: hidden; gap: 0; }
+                    #tw-main { display: flex; flex: 1; overflow: hidden; }
                     #tw-table-panel { flex: 3; overflow-y: auto; padding: 0; }
 
                     .tw-table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -990,25 +756,22 @@
 
                     .tw-village-name { font-weight: 600; color: ${C.texto}; font-size: 12px; }
                     .tw-village-coord { font-size: 9px; color: ${C.verde}66; margin-top: 1px; }
-                    .tw-village-meta { font-size: 10px; color: ${C.textoDim}; margin-top: 3px; }
-                    .tw-village-res { font-size: 9px; color: ${C.textoDim}; margin-top: 3px; }
+                    .tw-village-res { font-size: 9px; color: ${C.textoDim}; margin-top: 4px; }
 
                     .tw-fill-bar { background: ${C.fundo}; border-radius: 3px; height: 4px; width: 70px; margin-top: 5px; overflow: hidden; }
                     .tw-fill-inner { height: 100%; background: #e74c3c; border-radius: 3px; transition: width 0.3s; }
 
-                    .tw-incoming-badge { display: inline-block; margin-top: 3px; font-size: 9px; color: ${C.aviso}; background: ${C.avisoDim}; border: 1px solid ${C.aviso}44; border-radius: 3px; padding: 1px 5px; }
-
                     .tw-chips { display: flex; flex-wrap: wrap; gap: 4px; }
                     .tw-res-chip { display: inline-block; font-size: 10px; font-weight: 600; border-radius: 4px; padding: 2px 7px; border: 1px solid transparent; }
-                    .tw-chip-wood { background: #8b691411; border-color: ${C.madeira}44; color: #c9a227; }
+                    .tw-chip-wood  { background: #8b691411; border-color: ${C.madeira}44; color: #c9a227; }
                     .tw-chip-stone { background: #60708011; border-color: ${C.pedra}44; color: #8ca0b0; }
-                    .tw-chip-iron { background: #5a8a9f11; border-color: ${C.ferro}44; color: ${C.ferro}; }
+                    .tw-chip-iron  { background: #5a8a9f11; border-color: ${C.ferro}44; color: ${C.ferro}; }
 
                     .tw-merchant-count { font-size: 9px; color: ${C.textoDim}; margin-top: 5px; }
 
                     .tw-send-btn { background: ${C.verde}; color: #000; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; transition: all 0.15s; white-space: nowrap; }
                     .tw-send-btn:hover:not(:disabled) { background: ${C.verdeClaro}; transform: translateY(-1px); box-shadow: 0 3px 10px ${C.verde}44; }
-                    .tw-send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+                    .tw-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
                     .tw-action-btn { padding: 7px 16px; border: none; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; transition: all 0.15s; }
                     #tw-btn-carregar { background: #c97c00; color: #fff; }
@@ -1025,71 +788,125 @@
 
                 <div id="tw-app">
                     <div id="tw-header">
-                        <h1>⚖️ TW Resource Balancer <span>v3.8</span></h1>
-                        <div id="tw-header-right"></div>
+                        <h1>⚖️ TW Resource Balancer <span>v4.0 — Crescimento Acelerado</span></h1>
+                        <div id="tw-header-right">
+                            <span id="tw-premium-badge" style="font-size:11px;color:${C.textoDim};">— conta —</span>
+                        </div>
                     </div>
 
                     <div id="tw-config-bar">
-                        <div class="tw-config-group"><label>Tolerância:</label><input type="number" id="tw-tolerancia" value="${this.config.toleranciaPercentual}" min="1" max="50" step="1"><span>%</span></div>
-                        <div class="tw-config-group"><label>Envio mínimo:</label><input type="number" id="tw-min-envio" value="${this.config.minEnvio}" min="1000" max="100000" step="1000"></div>
-                        <div class="tw-config-group"><label>Buffer:</label><input type="number" id="tw-buffer" value="${this.config.bufferPercentual}" min="0" max="40" step="5"><span>%</span></div>
-                        <div class="tw-config-group"><label>Reserva Mínima:</label><input type="number" id="tw-reserva" value="${this.config.reservaMinimaPercentual}" min="10" max="70" step="5"><span>% da média</span></div>
-                        <div class="tw-config-group"><label>Delay entre lotes:</label><input type="number" id="tw-delay" value="${this.config.delayEntreLotes}" min="300" max="2000" step="100"><span>ms</span></div>
+                        <div class="tw-config-group">
+                            <label>🛡️ Reserva doadora:</label>
+                            <input type="number" id="tw-seguranca" value="${this.config.estoqueSegurancaDoadora}" min="5000" max="200000" step="5000">
+                            <span>res.</span>
+                        </div>
+                        <div class="tw-config-group">
+                            <label>📦 Limite/cmd:</label>
+                            <input type="number" id="tw-limite-cmd" value="${this.config.limiteEnvioPorComando}" min="1000" max="20000" step="1000">
+                            <span>res.</span>
+                        </div>
+                        <div class="tw-config-group">
+                            <label>🏚️ Armazém receptora:</label>
+                            <input type="number" id="tw-limite-arm" value="${this.config.limiteArmazemReceptora}" min="50" max="99" step="5">
+                            <span>%</span>
+                        </div>
+                        <div class="tw-config-group">
+                            <label>Min. individual:</label>
+                            <input type="number" id="tw-min-indiv" value="${this.config.minEnvioIndividual}" min="100" max="10000" step="100">
+                        </div>
                     </div>
 
                     <div id="tw-stats-strip">
-                        <div class="tw-stat-card"><div class="tw-stat-card-title">📦 Totais</div><div class="tw-stat-card-body"><span class="tw-res-val">🌲 <b id="tw-total-wood">0</b></span><span class="tw-res-val">🧱 <b id="tw-total-stone">0</b></span><span class="tw-res-val">⚙️ <b id="tw-total-iron">0</b></span></div></div>
-                        <div class="tw-stat-card"><div class="tw-stat-card-title">📊 Médias por Aldeia</div><div class="tw-stat-card-body"><span class="tw-res-val">🌲 <b id="tw-media-wood">0</b></span><span class="tw-res-val">🧱 <b id="tw-media-stone">0</b></span><span class="tw-res-val">⚙️ <b id="tw-media-iron">0</b></span></div></div>
+                        <div class="tw-stat-card">
+                            <div class="tw-stat-card-title">📦 Totais</div>
+                            <div class="tw-stat-card-body">
+                                <span class="tw-res-val">🌲 <b id="tw-total-wood">0</b></span>
+                                <span class="tw-res-val">🧱 <b id="tw-total-stone">0</b></span>
+                                <span class="tw-res-val">⚙️ <b id="tw-total-iron">0</b></span>
+                            </div>
+                        </div>
+                        <div class="tw-stat-card">
+                            <div class="tw-stat-card-title">📊 Médias por Aldeia</div>
+                            <div class="tw-stat-card-body">
+                                <span class="tw-res-val">🌲 <b id="tw-media-wood">0</b></span>
+                                <span class="tw-res-val">🧱 <b id="tw-media-stone">0</b></span>
+                                <span class="tw-res-val">⚙️ <b id="tw-media-iron">0</b></span>
+                            </div>
+                        </div>
+                        <div class="tw-stat-card">
+                            <div class="tw-stat-card-title">🏅 Critério: Média de Pontos</div>
+                            <div class="tw-stat-card-body">
+                                <span class="tw-pts-val">Média: <b id="tw-media-pontos">0</b> pts</span>
+                            </div>
+                        </div>
                     </div>
 
-                    <div id="tw-progress-container"><div id="tw-progress-track"><div id="tw-loading-progress"></div><div id="tw-progress-label">0%</div></div></div>
+                    <div id="tw-progress-container">
+                        <div id="tw-progress-track">
+                            <div id="tw-loading-progress"></div>
+                            <div id="tw-progress-label">0%</div>
+                        </div>
+                    </div>
 
-                    <div id="tw-toolbar"><button id="tw-btn-carregar" class="tw-action-btn">🔄 CARREGAR DADOS</button><span id="tw-sugestoes-count"></span></div>
+                    <div id="tw-toolbar">
+                        <button id="tw-btn-carregar" class="tw-action-btn">🔄 CARREGAR DADOS</button>
+                        <span id="tw-sugestoes-count"></span>
+                    </div>
 
                     <div id="tw-main">
-                        <div id="tw-table-panel"><table class="tw-table"><thead><tr><th>Origem</th><th>Destino</th><th>Sugestão de Envio</th><th>Ação</th></tr></thead><tbody id="tw-lista-aldeias"><tr><td colspan="4" style="text-align:center; color:${C.textoDim}; padding:40px 0;">Clique em <strong style="color:${C.verde};">CARREGAR DADOS</strong> para iniciar.</td></tr></tbody></table></div>
-                        <div id="tw-log-panel"><div id="tw-log-header">📝 Log de Atividades</div><div id="tw-log-area"></div></div>
+                        <div id="tw-table-panel">
+                            <table class="tw-table">
+                                <thead>
+                                    <tr>
+                                        <th>🏅 Doadora (acima da média)</th>
+                                        <th>📈 Receptora (abaixo da média)</th>
+                                        <th>Sugestão de Envio</th>
+                                        <th>Ação</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tw-lista-aldeias">
+                                    <tr><td colspan="4" style="text-align:center;color:${C.textoDim};padding:40px 0;">Clique em <strong style="color:${C.verde};">CARREGAR DADOS</strong> para iniciar a extração global.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="tw-log-panel">
+                            <div id="tw-log-header">📝 Log de Atividades</div>
+                            <div id="tw-log-area"></div>
+                        </div>
                     </div>
                 </div>
             `;
 
-            this.adicionarLog('⚖️ TW Resource Balancer v3.8 iniciado. BUG DA LINHA 606 CORRIGIDO!', 'info');
-            this.adicionarLog('🛡️ Proteção anti-esgotamento ativa: reserva mínima de ' + this.config.reservaMinimaPercentual + '% da média.', 'info');
+            this.adicionarLog('⚖️ TW Resource Balancer v4.0 iniciado.', 'info');
+            this.adicionarLog('🚀 Extração global ativa: apenas 1 fetch para todas as aldeias!', 'success');
+            this.adicionarLog('🏅 Lógica: Crescimento Acelerado por Pontos de Evolução.', 'info');
+            this.adicionarLog(`📦 Limite por comando: ${this.config.limiteEnvioPorComando.toLocaleString()} (conta básica).`, 'info');
 
-            const bindConfig = (id, key, parser, updateFn = null) => {
+            // Bind das configurações
+            const bindConfig = (id, key, parser) => {
                 const el = document.getElementById(id);
                 if (!el) return;
                 el.onchange = (e) => {
-                    const val = parser(e.target.value);
-                    this.config[key] = val;
+                    this.config[key] = parser(e.target.value);
                     this.salvarConfig();
-                    if (updateFn) updateFn(val);
                     if (this.villagesData.length > 0) this.renderizarTabela();
-                    this.adicionarLog(`⚙️ ${key} → ${val}`, 'info');
+                    this.adicionarLog(`⚙️ ${key} → ${this.config[key]}`, 'info');
                 };
             };
 
-            bindConfig('tw-tolerancia', 'toleranciaPercentual', v => Math.max(1, parseInt(v) || 5));
-            bindConfig('tw-min-envio', 'minEnvio', v => Math.max(1000, parseInt(v) || 1000));
-            bindConfig('tw-buffer', 'bufferPercentual', v => {
-                const val = Math.max(0, parseInt(v) || 10);
-                if (this.villagesData.length > 0) {
-                    const mult = (100 - val) / 100;
-                    for (const v of this.villagesData) {
-                        v.espacoUtilizavel = Math.floor(v.espacoReal * mult);
-                    }
-                }
-                return val;
-            });
-            bindConfig('tw-reserva', 'reservaMinimaPercentual', v => Math.max(10, Math.min(70, parseInt(v) || 30)));
-            bindConfig('tw-delay', 'delayEntreLotes', v => Math.max(300, Math.min(2000, parseInt(v) || 800)));
+            bindConfig('tw-seguranca',   'estoqueSegurancaDoadora',  v => Math.max(5000, parseInt(v) || 30000));
+            bindConfig('tw-limite-cmd',  'limiteEnvioPorComando',    v => Math.max(1000, Math.min(20000, parseInt(v) || 10000)));
+            bindConfig('tw-limite-arm',  'limiteArmazemReceptora',   v => Math.max(50,   Math.min(99,    parseInt(v) || 90)));
+            bindConfig('tw-min-indiv',   'minEnvioIndividual',       v => Math.max(100,  parseInt(v) || 1000));
 
             document.getElementById('tw-btn-carregar').onclick = () => this.carregarDados();
             window.TWResourceBalancer = this;
         }
     };
 
-    // Aguarda o DOM estar completamente carregado
+    // ─────────────────────────────────────────────────────────────────────────────
+    // BOOT
+    // ─────────────────────────────────────────────────────────────────────────────
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => TWResourceBalancer.init());
     } else {
