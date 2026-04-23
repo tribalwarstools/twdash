@@ -9,9 +9,6 @@
 (function () {
     'use strict';
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // FALLBACK UI KIT
-    // ─────────────────────────────────────────────────────────────────────────────
     if (typeof window.TWUI === 'undefined') {
         window.TWUI = {
             colors: {
@@ -61,10 +58,6 @@
             madeira: '#8b6914', pedra: '#607080', ferro: '#5a8a9f',
             pontos: '#a78bfa'
         },
-
-        // ─────────────────────────────────────────────────────────────────────────
-        // INICIALIZAÇÃO
-        // ─────────────────────────────────────────────────────────────────────────
 
         init() {
             console.log('⚖️ TW Resource Balancer v4.1 - Extração Global + Validação Inteligente');
@@ -156,6 +149,19 @@
 
             const off = this.premiumAtivo ? 1 : 0;
 
+            // ⭐ PRESERVA MERCADORES JÁ VALIDADOS
+            const mercadoresExistentes = new Map();
+            if (this.villagesData && this.villagesData.length > 0) {
+                for (const v of this.villagesData) {
+                    if (v.merchantsValidated && v.merchants !== null) {
+                        mercadoresExistentes.set(v.id, {
+                            merchants: v.merchants,
+                            validated: true
+                        });
+                    }
+                }
+            }
+
             const aldeias = linhas.map(linha => {
                 const c = linha.cells;
                 const textoAldeia = c[off]?.innerText?.trim() || '';
@@ -173,6 +179,9 @@
                 const armazem = parseInt((c[off + 3]?.innerText || '0').replace(/\./g, '')) || 0;
                 const fazenda = c[off + 4]?.innerText?.trim() || '0/0';
 
+                // ⭐ RESTAURA MERCADORES VALIDADOS
+                const existente = mercadoresExistentes.get(id);
+
                 return {
                     id, nome, coord, pontos,
                     wood: madeira, stone: argila, iron: ferro,
@@ -181,8 +190,8 @@
                     fazenda,
                     woodACaminho: 0, stoneACaminho: 0, ironACaminho: 0,
                     csrf: null,
-                    merchants: null,
-                    merchantsValidated: false
+                    merchants: existente ? existente.merchants : null,
+                    merchantsValidated: existente ? existente.validated : false
                 };
             });
 
@@ -330,7 +339,6 @@
             }
         },
 
-        // ⭐ FUNÇÃO CORRIGIDA - OCULTA ALDEIAS SEM MERCADORES
         getSugestoesBalanceamento() {
             this.usedOriginsInCycle.clear();
             this.usedDestinationsInCycle.clear();
@@ -340,23 +348,13 @@
             const minIndiv   = this.config.minEnvioIndividual;
             const pctArm     = this.config.limiteArmazemReceptora / 100;
 
-            // ⭐ FILTRO INTELIGENTE DE DOADORAS:
-            // - Premium: todas as aldeias acima da média
-            // - Básica: só inclui se tiver mercadores validados > 0 OU ainda não validou
             const doadoras = this.villagesData
                 .filter(a => {
                     if (a.pontos < this.mediaPontos) return false;
-
-                    // Conta Premium: sempre considera
                     if (this.premiumAtivo) return true;
-
-                    // Conta Básica: verifica validação de mercadores
                     if (a.merchantsValidated) {
-                        // Se já validou, só inclui se tem mercadores > 0
                         return a.merchants > 0;
                     }
-
-                    // Ainda não validou, inclui (vai validar no clique)
                     return true;
                 })
                 .sort((a, b) => b.pontos - a.pontos);
@@ -633,7 +631,7 @@
             this.villagesData = snapshot;
 
             if (!sugestoes || sugestoes.length === 0) {
-                tbody.innerHTML = '<td><td colspan="4" style="text-align:center;padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:' + this.CORES.verde + ';font-weight:bold;">Todas as aldeias estão em equilíbrio!</span><br><span style="font-size:10px;color:' + this.CORES.textoDim + ';">Segurança doadora: ' + this.config.estoqueSegurancaDoadora.toLocaleString() + ' | Limite/cmd: ' + this.config.limiteEnvioPorComando.toLocaleString() + '</span></td></tr>';
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:32px 0;"><span style="font-size:22px;">✅</span><br><span style="color:' + this.CORES.verde + ';font-weight:bold;">Todas as aldeias estão em equilíbrio!</span><br><span style="font-size:10px;color:' + this.CORES.textoDim + ';">Segurança doadora: ' + this.config.estoqueSegurancaDoadora.toLocaleString() + ' | Limite/cmd: ' + this.config.limiteEnvioPorComando.toLocaleString() + '</span></td></tr>';
                 const countEl = document.getElementById('tw-sugestoes-count');
                 if (countEl) countEl.textContent = 'Nenhuma sugestão';
                 return;
