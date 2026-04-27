@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tribal Wars - Envio Multi-Aldeias
 // @namespace    https://github.com/tribalwarstools
-// @version      4.2.0
-// @description   Com validação: não enviar de uma aldeia para ela mesma
+// @version      4.3.0
+// @description  Com validação: não enviar de uma aldeia para ela mesma
 // @author       DeepSeek
 // @match        https://*.tribalwars.com.br/game.php*
 // @match        https://*.tribalwars.com/game.php*
@@ -20,7 +20,9 @@
 
     const DASHBOARD_PARAM = 'twMultiSend=true';
     const STORAGE_KEY = 'TW_MULTI_SEND_CONFIG';
+    // FIX #11: Usar a constante onde era hard-coded 1000
     const MAX_POR_MERCADOR = 1000;
+    const FETCH_TIMEOUT_MS = 10000;
 
     const CONFIG = {
         DELAY_ENTRE_ENVIOS: 800,
@@ -31,13 +33,16 @@
         GM_setValue(STORAGE_KEY, JSON.stringify(CONFIG));
     }
 
+    // FIX #8: catch com aviso em vez de silêncio total
     try {
         const saved = GM_getValue(STORAGE_KEY);
         if (saved) {
             const parsed = JSON.parse(saved);
             Object.assign(CONFIG, parsed);
         }
-    } catch(e) {}
+    } catch(e) {
+        console.warn('[TW Multi-Aldeias] Falha ao carregar configuração salva, usando padrões.', e);
+    }
 
     const CORES = {
         fundo: '#080c10',
@@ -61,6 +66,18 @@
         return false;
     }
 
+    // FIX #9: fetch com AbortController para timeout
+    async function fetchComTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const response = await fetch(url, { signal: controller.signal });
+            return response;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
     // ==================== EXTRAIR ALDEIAS ====================
     async function extrairAldeias(ui) {
         if (ui) ui.log('📡 Buscando aldeias...', 'info');
@@ -69,7 +86,8 @@
         const url = `/game.php?screen=overview_villages&mode=prod&group=0&page=-1`;
 
         try {
-            const response = await fetch(url);
+            // FIX #9: timeout no fetch
+            const response = await fetchComTimeout(url);
             const html = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
@@ -89,24 +107,26 @@
                 if (!linkVila) continue;
 
                 const celulas = linha.cells;
-                const textoAldeia = celulas[offset].innerText.trim();
+                // FIX #1: usar textContent em vez de innerText (documentos DOMParser não suportam innerText)
+                const textoAldeia = (celulas[offset]?.textContent || '').trim();
                 const coordsMatch = textoAldeia.match(/(\d+)\|(\d+)/);
                 const x = coordsMatch ? parseInt(coordsMatch[1]) : 0;
                 const y = coordsMatch ? parseInt(coordsMatch[2]) : 0;
                 const coord = `${x}|${y}`;
                 const nome = textoAldeia.split('(')[0].trim();
-                const pontos = parseInt(celulas[offset + 1]?.innerText?.replace(/\./g, '') || '0');
+                const pontos = parseInt((celulas[offset + 1]?.textContent || '0').replace(/\./g, ''));
 
-                const resTexto = celulas[offset + 2]?.innerText?.replace(/\./g, '') || '0';
+                const resTexto = (celulas[offset + 2]?.textContent || '0').replace(/\./g, '');
                 const resNums = resTexto.match(/\d+/g) || [0, 0, 0];
                 const madeira = parseInt(resNums[0] || 0);
                 const argila = parseInt(resNums[1] || 0);
                 const ferro = parseInt(resNums[2] || 0);
-                const armazem = parseInt(celulas[offset + 3]?.innerText?.replace(/\./g, '') || '0');
+                const armazem = parseInt((celulas[offset + 3]?.textContent || '0').replace(/\./g, ''));
 
                 let comerciantesDisp = 0, comerciantesTotal = 0;
                 if (premiumAtivo && celulas[offset + 4]) {
-                    const comerMatch = celulas[offset + 4].innerText.trim().match(/(\d+)\/(\d+)/);
+                    // FIX #1: textContent em vez de innerText
+                    const comerMatch = (celulas[offset + 4].textContent || '').trim().match(/(\d+)\/(\d+)/);
                     if (comerMatch) {
                         comerciantesDisp = parseInt(comerMatch[1]);
                         comerciantesTotal = parseInt(comerMatch[2]);
@@ -140,7 +160,9 @@
             return aldeias;
 
         } catch (err) {
-            if (ui) ui.log(`❌ Erro: ${err.message}`, 'error');
+            // FIX #9: identificar timeout explicitamente
+            const msg = err.name === 'AbortError' ? 'Timeout ao carregar aldeias' : err.message;
+            if (ui) ui.log(`❌ Erro: ${msg}`, 'error');
             return [];
         }
     }
@@ -148,7 +170,8 @@
     async function buscarComerciantesPorAldeia(villageId) {
         try {
             const url = `/game.php?village=${villageId}&screen=market`;
-            const response = await fetch(url);
+            // FIX #9: timeout no fetch
+            const response = await fetchComTimeout(url);
             const html = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
@@ -157,9 +180,10 @@
             const totalSpan = doc.getElementById('market_merchant_total_count');
 
             if (availableSpan && totalSpan) {
+                // FIX #1: textContent em vez de innerText
                 return {
-                    disp: parseInt(availableSpan.innerText.trim()) || 0,
-                    total: parseInt(totalSpan.innerText.trim()) || 0
+                    disp: parseInt((availableSpan.textContent || '').trim()) || 0,
+                    total: parseInt((totalSpan.textContent || '').trim()) || 0
                 };
             }
             return { disp: 0, total: 0 };
@@ -186,21 +210,37 @@
         try {
             const [x, y] = coord.split('|');
             const url = `/game.php?screen=info_village&mode=found&x=${x}&y=${y}`;
-            const response = await fetch(url);
+            // FIX #9: timeout no fetch
+            const response = await fetchComTimeout(url);
             const html = await response.text();
 
+            // Buscar ID via regex
             const idMatch = html.match(/village=(\d+)/);
             if (!idMatch) return { coord, encontrado: false };
 
+            // FIX #3: usar DOMParser para extrair armazém em vez de regex frágil
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+
             let armazem = 0;
-            const warehouseMatch = html.match(/armaz[ée]m[^<]*<\/span>\s*<span[^>]*>([\d.]+)<\/span>/i);
-            if (warehouseMatch) {
-                armazem = parseInt(warehouseMatch[1].replace(/\./g, '')) || 0;
+
+            // Tenta via seletor semântico primeiro
+            const spanArmazem = doc.querySelector('[data-type="warehouse"] .res, .warehouse .res');
+            if (spanArmazem) {
+                armazem = parseInt((spanArmazem.textContent || '').replace(/\./g, '')) || 0;
+            }
+
+            // Fallback para regex como segunda opção
+            if (!armazem) {
+                const warehouseMatch = html.match(/armaz[ée]m[^<]*<\/span>\s*<span[^>]*>([\d.]+)<\/span>/i);
+                if (warehouseMatch) {
+                    armazem = parseInt(warehouseMatch[1].replace(/\./g, '')) || 0;
+                }
             }
 
             return {
                 coord,
-                id: idMatch[1],
+                id: parseInt(idMatch[1]),
                 armazem,
                 madeira: 0, argila: 0, ferro: 0,
                 encontrado: armazem > 0
@@ -226,8 +266,13 @@
         const percDestino = CONFIG.PERCENTUAL_ARMAZEM_DESTINO / 100;
 
         for (const destino of destinos) {
+            // FIX #2: destino sem id (armazém manual) não pode ser enviado
             if (!destino.encontrado || !destino.armazem) {
                 ui.log(`⚠️ Destino ${destino.coord} não encontrado`, 'warning');
+                continue;
+            }
+            if (!destino.id) {
+                ui.log(`⚠️ Destino ${destino.coord} sem ID — informe o armazém e consulte novamente`, 'warning');
                 continue;
             }
 
@@ -243,6 +288,17 @@
                 continue;
             }
 
+            // FIX #4: avisar sobre necessidades menores que 1 mercador
+            const necessidadeTotal = necessidadeMadeira + necessidadeArgila + necessidadeFerro;
+            const necessidadeArredondada =
+                Math.floor(necessidadeMadeira / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
+                Math.floor(necessidadeArgila / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
+                Math.floor(necessidadeFerro / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
+            if (necessidadeArredondada === 0 && necessidadeTotal > 0) {
+                ui.log(`ℹ️ ${destino.coord}: necessidade (${necessidadeTotal}) < 1 mercador (${MAX_POR_MERCADOR}) — ignorado`, 'info');
+                continue;
+            }
+
             ui.log(`📦 ${destino.coord}: 🌲+${necessidadeMadeira.toLocaleString()} 🧱+${necessidadeArgila.toLocaleString()} ⚙️+${necessidadeFerro.toLocaleString()}`, 'info');
 
             for (const origem of origensViaveis) {
@@ -252,12 +308,18 @@
                 let madeiraEnvio = 0, argilaEnvio = 0, ferroEnvio = 0;
                 let mercadoresUsados = 0;
 
+                // FIX #11: usar MAX_POR_MERCADOR no lugar de 1000 hard-coded
                 // MADEIRA
                 if (necessidadeMadeira > 0 && origem.madeira > 0) {
                     let enviar = Math.min(necessidadeMadeira, origem.madeira);
-                    enviar = Math.floor(enviar / 1000) * 1000;
-                    let mercs = enviar / 1000;
-                    if (mercs <= origem.comerciantesDisp) {
+                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
+                    let mercs = enviar / MAX_POR_MERCADOR;
+                    // FIX #6: limitar pelo número de mercadores disponíveis (envio parcial)
+                    if (mercs > origem.comerciantesDisp) {
+                        mercs = origem.comerciantesDisp;
+                        enviar = mercs * MAX_POR_MERCADOR;
+                    }
+                    if (enviar > 0) {
                         madeiraEnvio = enviar;
                         mercadoresUsados += mercs;
                         necessidadeMadeira -= enviar;
@@ -268,10 +330,15 @@
                 // ARGILA
                 if (necessidadeArgila > 0 && origem.argila > 0 && mercadoresUsados < origem.comerciantesDisp) {
                     let enviar = Math.min(necessidadeArgila, origem.argila);
-                    enviar = Math.floor(enviar / 1000) * 1000;
+                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
                     let mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
-                    let mercsNecessarios = enviar / 1000;
-                    if (mercsNecessarios <= mercsRestantes) {
+                    let mercsNecessarios = enviar / MAX_POR_MERCADOR;
+                    // FIX #6: envio parcial se não há mercadores suficientes
+                    if (mercsNecessarios > mercsRestantes) {
+                        mercsNecessarios = mercsRestantes;
+                        enviar = mercsNecessarios * MAX_POR_MERCADOR;
+                    }
+                    if (enviar > 0) {
                         argilaEnvio = enviar;
                         mercadoresUsados += mercsNecessarios;
                         necessidadeArgila -= enviar;
@@ -282,10 +349,15 @@
                 // FERRO
                 if (necessidadeFerro > 0 && origem.ferro > 0 && mercadoresUsados < origem.comerciantesDisp) {
                     let enviar = Math.min(necessidadeFerro, origem.ferro);
-                    enviar = Math.floor(enviar / 1000) * 1000;
+                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
                     let mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
-                    let mercsNecessarios = enviar / 1000;
-                    if (mercsNecessarios <= mercsRestantes) {
+                    let mercsNecessarios = enviar / MAX_POR_MERCADOR;
+                    // FIX #6: envio parcial se não há mercadores suficientes
+                    if (mercsNecessarios > mercsRestantes) {
+                        mercsNecessarios = mercsRestantes;
+                        enviar = mercsNecessarios * MAX_POR_MERCADOR;
+                    }
+                    if (enviar > 0) {
                         ferroEnvio = enviar;
                         mercadoresUsados += mercsNecessarios;
                         necessidadeFerro -= enviar;
@@ -316,7 +388,8 @@
     }
 
     // ==================== ENVIAR RECURSOS ====================
-    function enviarRecursos(sourceID, targetID, wood, stone, iron, ui) {
+    // FIX #10: retry em caso de falha temporária
+    function enviarRecursos(sourceID, targetID, wood, stone, iron, ui, tentativa = 1) {
         return new Promise((resolve) => {
             if (wood + stone + iron === 0) {
                 resolve(false);
@@ -338,11 +411,18 @@
                         resolve(true);
                     }
                 }, function(error) {
-                    ui.log(`❌ Erro: ${error}`, 'error');
-                    resolve(false);
+                    if (tentativa < 2) {
+                        ui.log(`⚠️ Falha temporária, tentando novamente... (tentativa ${tentativa})`, 'warning');
+                        setTimeout(() => {
+                            enviarRecursos(sourceID, targetID, wood, stone, iron, ui, tentativa + 1).then(resolve);
+                        }, 1500);
+                    } else {
+                        ui.log(`❌ Erro após ${tentativa} tentativas: ${error}`, 'error');
+                        resolve(false);
+                    }
                 });
             } else {
-                ui.log(`⚠️ API não disponível`, 'warning');
+                ui.log(`⚠️ API TribalWars não disponível`, 'warning');
                 resolve(false);
             }
         });
@@ -357,7 +437,7 @@
         ui.injectStyles();
         ui.renderApp();
 
-        ui.header('📤 Envio Multi-Aldeias v4.2', 'Validação: origem não pode ser igual ao destino',
+        ui.header('📤 Envio Multi-Aldeias v4.3', 'Validação: origem não pode ser igual ao destino',
             `<button id="twb-close-btn" style="background:${CORES.erro}22;border:1px solid ${CORES.erro}44;color:${CORES.erro};padding:4px 10px;border-radius:4px;cursor:pointer;">✕ Fechar</button>`
         );
 
@@ -476,7 +556,7 @@
                         <input type="checkbox" id="twb-select-all" checked>
                         <strong>Selecionar Todas (${aldeias.length} aldeias)</strong>
                     </label>
-                    ${aldeias.map((a, idx) => `
+                    ${aldeias.map((a) => `
                         <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 6px; border-bottom: 1px solid ${CORES.borda}44; cursor: pointer;">
                             <input type="checkbox" class="twb-origem" value="${a.id}" data-coord="${a.coord}" checked>
                             <div style="flex:1;">
@@ -501,7 +581,9 @@
                 });
 
                 ui.log(`✅ ${aldeias.length} aldeias carregadas`, 'success');
-                document.getElementById('twb-calcular').disabled = false;
+
+                // FIX #7: só habilitar calcular após aldeias E destinos estarem prontos
+                // (botão calcular permanece disabled; será habilitado após consulta de destinos)
             }
 
             btn.textContent = '📡 CARREGAR ALDEIAS';
@@ -519,6 +601,12 @@
                 return;
             }
 
+            // FIX #7: verificar se aldeias foram carregadas
+            if (aldeias.length === 0) {
+                ui.log('⚠️ Carregue as aldeias de origem antes de consultar destinos', 'warning');
+                return;
+            }
+
             ui.log(`🔍 Consultando ${coords.length} destino(s)...`, 'info');
             const btn = document.getElementById('twb-consultar');
             btn.disabled = true;
@@ -528,6 +616,8 @@
             for (const coord of coords) {
                 let info = await consultarDestino(coord, aldeias);
                 if (!info.encontrado && armazemManual > 0) {
+                    // FIX #2: id permanece null para destinos com armazém manual;
+                    // calcularDistribuicao vai alertar e pular esses destinos
                     info = { coord, id: null, armazem: armazemManual, madeira: 0, argila: 0, ferro: 0, encontrado: true };
                 }
                 destinosConsultados.push(info);
@@ -543,9 +633,11 @@
                     const faltaArgila = Math.max(0, alvo - d.argila);
                     const faltaFerro = Math.max(0, alvo - d.ferro);
                     const fonte = aldeias.find(a => a.coord === d.coord) ? '🏠 sua' : '👤 outro';
+                    // FIX #2: aviso visual quando id não foi encontrado
+                    const semId = !d.id ? `<br><span style="color:${CORES.aviso};">⚠️ ID não encontrado — envio manual não disponível</span>` : '';
                     return `
                         <div style="padding: 8px; border-bottom: 1px solid ${CORES.borda}44;">
-                            <strong>✅ ${d.coord}</strong> <span style="color: ${CORES.textoDim};">${fonte}</span><br>
+                            <strong>✅ ${d.coord}</strong> <span style="color: ${CORES.textoDim};">${fonte}</span>${semId}<br>
                             📦 Armazém: ${d.armazem.toLocaleString()} (${meta}% = ${alvo.toLocaleString()} de cada)<br>
                             🌲 ${d.madeira.toLocaleString()} → +${faltaMadeira.toLocaleString()}<br>
                             🧱 ${d.argila.toLocaleString()} → +${faltaArgila.toLocaleString()}<br>
@@ -556,20 +648,31 @@
                 return `<div style="padding: 8px; color: ${CORES.erro};">⚠️ ${d.coord} - Não encontrado</div>`;
             }).join('');
 
+            // FIX #7: habilitar calcular somente agora que destinos foram consultados
+            const destinosViaveis = destinosConsultados.filter(d => d.encontrado && d.armazem > 0 && d.id);
+            if (destinosViaveis.length > 0 && aldeias.length > 0) {
+                document.getElementById('twb-calcular').disabled = false;
+            }
+
             btn.disabled = false;
             btn.textContent = '🔍 CONSULTAR DESTINOS';
             ui.log('✅ Consulta concluída', 'success');
         });
 
         // Configurações
+        // FIX #13: validar limites nas configurações
         document.getElementById('twb-percentual').addEventListener('change', (e) => {
-            CONFIG.PERCENTUAL_ARMAZEM_DESTINO = parseInt(e.target.value) || 80;
+            const val = parseInt(e.target.value) || 80;
+            CONFIG.PERCENTUAL_ARMAZEM_DESTINO = Math.max(10, Math.min(100, val));
+            e.target.value = CONFIG.PERCENTUAL_ARMAZEM_DESTINO;
             saveConfig();
             ui.log(`📦 Percentual ajustado para ${CONFIG.PERCENTUAL_ARMAZEM_DESTINO}%`, 'info');
         });
 
         document.getElementById('twb-delay').addEventListener('change', (e) => {
-            CONFIG.DELAY_ENTRE_ENVIOS = parseInt(e.target.value) || 800;
+            const val = parseInt(e.target.value) || 800;
+            CONFIG.DELAY_ENTRE_ENVIOS = Math.max(200, Math.min(5000, val));
+            e.target.value = CONFIG.DELAY_ENTRE_ENVIOS;
             saveConfig();
         });
 
@@ -605,20 +708,16 @@
             });
 
             if (origensRemovidas.length > 0) {
-                ui.log(`⚠️ ${origensRemovidas.length} aldeia(s) removidas da seleção por serem também destinos: ${origensRemovidas.join(', ')}`, 'warning');
+                ui.log(`⚠️ ${origensRemovidas.length} aldeia(s) removidas por serem também destinos: ${origensRemovidas.join(', ')}`, 'warning');
 
-                // Desmarcar os checkboxes correspondentes
                 for (const coord of origensRemovidas) {
                     const checkbox = document.querySelector(`.twb-origem[data-coord="${coord}"]`);
                     if (checkbox) {
                         checkbox.checked = false;
-                        // Estilizar o label para mostrar que foi desmarcado
                         const label = checkbox.closest('label');
                         if (label) {
                             label.style.opacity = '0.5';
-                            setTimeout(() => {
-                                label.style.opacity = '1';
-                            }, 2000);
+                            setTimeout(() => { label.style.opacity = '1'; }, 2000);
                         }
                     }
                 }
@@ -723,7 +822,7 @@
         });
 
         document.getElementById('twb-close-btn').addEventListener('click', () => window.close());
-        ui.log('📤 Envio Multi-Aldeias v4.2 - Com validação origem/destino!', 'success');
+        ui.log('📤 Envio Multi-Aldeias v4.3 - Com validação origem/destino e correções!', 'success');
         ui.log('💡 Se uma origem também for destino, ela é automaticamente removida', 'info');
     }
 
