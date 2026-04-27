@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tribal Wars - Envio Multi-Aldeias
 // @namespace    https://github.com/tribalwarstools
-// @version      4.3.0
+// @version      4.4.0
 // @description  Com validação: não enviar de uma aldeia para ela mesma
 // @author       DeepSeek
 // @match        https://*.tribalwars.com.br/game.php*
@@ -26,7 +26,9 @@
 
     const CONFIG = {
         DELAY_ENTRE_ENVIOS: 800,
-        PERCENTUAL_ARMAZEM_DESTINO: 80
+        PERCENTUAL_ARMAZEM_DESTINO: 80,
+        // Ordem de prioridade dos recursos (primeiro = maior prioridade quando mercadores são limitados)
+        PRIORIDADE_RECURSOS: ['madeira', 'argila', 'ferro']
     };
 
     function saveConfig() {
@@ -305,65 +307,47 @@
                 if (necessidadeMadeira <= 0 && necessidadeArgila <= 0 && necessidadeFerro <= 0) break;
                 if (origem.comerciantesDisp <= 0) continue;
 
-                let madeiraEnvio = 0, argilaEnvio = 0, ferroEnvio = 0;
                 let mercadoresUsados = 0;
 
-                // FIX #11: usar MAX_POR_MERCADOR no lugar de 1000 hard-coded
-                // MADEIRA
-                if (necessidadeMadeira > 0 && origem.madeira > 0) {
-                    let enviar = Math.min(necessidadeMadeira, origem.madeira);
-                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
-                    let mercs = enviar / MAX_POR_MERCADOR;
-                    // FIX #6: limitar pelo número de mercadores disponíveis (envio parcial)
-                    if (mercs > origem.comerciantesDisp) {
-                        mercs = origem.comerciantesDisp;
-                        enviar = mercs * MAX_POR_MERCADOR;
-                    }
-                    if (enviar > 0) {
-                        madeiraEnvio = enviar;
-                        mercadoresUsados += mercs;
-                        necessidadeMadeira -= enviar;
-                        origem.madeira -= enviar;
-                    }
-                }
+                // Processar recursos na ordem de prioridade configurada pelo usuário (#5)
+                const necessidades = { madeira: necessidadeMadeira, argila: necessidadeArgila, ferro: necessidadeFerro };
+                const estoqueOrigem = { madeira: origem.madeira, argila: origem.argila, ferro: origem.ferro };
+                const envios_res = { madeira: 0, argila: 0, ferro: 0 };
 
-                // ARGILA
-                if (necessidadeArgila > 0 && origem.argila > 0 && mercadoresUsados < origem.comerciantesDisp) {
-                    let enviar = Math.min(necessidadeArgila, origem.argila);
+                for (const recurso of CONFIG.PRIORIDADE_RECURSOS) {
+                    if (mercadoresUsados >= origem.comerciantesDisp) break;
+                    if (necessidades[recurso] <= 0 || estoqueOrigem[recurso] <= 0) continue;
+
+                    let enviar = Math.min(necessidades[recurso], estoqueOrigem[recurso]);
                     enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
-                    let mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
                     let mercsNecessarios = enviar / MAX_POR_MERCADOR;
+                    const mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
+
                     // FIX #6: envio parcial se não há mercadores suficientes
                     if (mercsNecessarios > mercsRestantes) {
                         mercsNecessarios = mercsRestantes;
                         enviar = mercsNecessarios * MAX_POR_MERCADOR;
                     }
+
                     if (enviar > 0) {
-                        argilaEnvio = enviar;
+                        envios_res[recurso] = enviar;
                         mercadoresUsados += mercsNecessarios;
-                        necessidadeArgila -= enviar;
-                        origem.argila -= enviar;
+                        necessidades[recurso] -= enviar;
+                        estoqueOrigem[recurso] -= enviar;
                     }
                 }
 
-                // FERRO
-                if (necessidadeFerro > 0 && origem.ferro > 0 && mercadoresUsados < origem.comerciantesDisp) {
-                    let enviar = Math.min(necessidadeFerro, origem.ferro);
-                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
-                    let mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
-                    let mercsNecessarios = enviar / MAX_POR_MERCADOR;
-                    // FIX #6: envio parcial se não há mercadores suficientes
-                    if (mercsNecessarios > mercsRestantes) {
-                        mercsNecessarios = mercsRestantes;
-                        enviar = mercsNecessarios * MAX_POR_MERCADOR;
-                    }
-                    if (enviar > 0) {
-                        ferroEnvio = enviar;
-                        mercadoresUsados += mercsNecessarios;
-                        necessidadeFerro -= enviar;
-                        origem.ferro -= enviar;
-                    }
-                }
+                // Propagar de volta para as variáveis de necessidade e estoque da origem
+                necessidadeMadeira = necessidades.madeira;
+                necessidadeArgila  = necessidades.argila;
+                necessidadeFerro   = necessidades.ferro;
+                origem.madeira = estoqueOrigem.madeira;
+                origem.argila  = estoqueOrigem.argila;
+                origem.ferro   = estoqueOrigem.ferro;
+
+                const madeiraEnvio = envios_res.madeira;
+                const argilaEnvio  = envios_res.argila;
+                const ferroEnvio   = envios_res.ferro;
 
                 if (madeiraEnvio > 0 || argilaEnvio > 0 || ferroEnvio > 0) {
                     envios.push({
@@ -437,9 +421,12 @@
         ui.injectStyles();
         ui.renderApp();
 
-        ui.header('📤 Envio Multi-Aldeias v4.3', 'Validação: origem não pode ser igual ao destino',
+        ui.header('📤 Envio Multi-Aldeias v4.4', 'Validação: origem não pode ser igual ao destino',
             `<button id="twb-close-btn" style="background:${CORES.erro}22;border:1px solid ${CORES.erro}44;color:${CORES.erro};padding:4px 10px;border-radius:4px;cursor:pointer;">✕ Fechar</button>`
         );
+
+        // Barra de progresso nativa do tw-ui-kit (oculta por padrão, ativada durante envios)
+        ui.progressBar();
 
         ui.mainLayout(`
             <div style="display: flex; gap: 20px; padding: 0 0 20px 0; flex-wrap: wrap;">
@@ -511,6 +498,26 @@
                                     style="width: 80px; background: ${CORES.fundo}; border: 1px solid ${CORES.borda};
                                         color: ${CORES.texto}; border-radius: 4px; padding: 4px; text-align: center;">
                             </label>
+                            <div style="margin-top: 12px;">
+                                <div style="font-size: 11px; color: ${CORES.textoDim}; margin-bottom: 6px;">🎯 Prioridade de recursos (arraste para reordenar):</div>
+                                <div id="twb-prioridade-list" style="display: flex; flex-direction: column; gap: 4px;">
+                                    ${(function() {
+                                        const INFO = {
+                                            madeira: { icon: '🌲', label: 'Madeira', cor: CORES.madeira },
+                                            argila:  { icon: '🧱', label: 'Argila',  cor: CORES.argila  },
+                                            ferro:   { icon: '⚙️', label: 'Ferro',   cor: CORES.ferro   }
+                                        };
+                                        return CONFIG.PRIORIDADE_RECURSOS.map(function(r, i) {
+                                            var inf = INFO[r];
+                                            return '<div draggable="true" data-recurso="' + r + '" style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:' + CORES.fundo + ';border:1px solid ' + CORES.borda + ';border-radius:5px;cursor:grab;font-size:11px;">'
+                                                + '<span style="color:' + CORES.textoDim + ';font-size:10px;">' + (i + 1) + 'º</span>'
+                                                + '<span>' + inf.icon + ' <span style="color:' + inf.cor + ';">' + inf.label + '</span></span>'
+                                                + '<span style="margin-left:auto;color:' + CORES.textoDim + ';font-size:10px;">☰</span>'
+                                                + '</div>';
+                                        }).join('');
+                                    }())}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -532,7 +539,6 @@
                         font-size: 12px; max-height: 300px; overflow-y: auto;
                         font-family: monospace;
                     "></div>
-                    <div id="twb-progresso" style="margin-top: 12px;"></div>
                 </div>
             </div>
         `, '📝 Log de Atividades');
@@ -543,9 +549,7 @@
 
         // Carregar aldeias
         document.getElementById('twb-btn-load').addEventListener('click', async () => {
-            const btn = document.getElementById('twb-btn-load');
-            btn.textContent = '⏳ CARREGANDO...';
-            btn.disabled = true;
+            ui.btnLoading('twb-btn-load', '⏳ CARREGANDO...');
 
             aldeias = await extrairAldeias(ui);
 
@@ -586,8 +590,7 @@
                 // (botão calcular permanece disabled; será habilitado após consulta de destinos)
             }
 
-            btn.textContent = '📡 CARREGAR ALDEIAS';
-            btn.disabled = false;
+            ui.btnRestore('twb-btn-load', '📡 CARREGAR ALDEIAS');
         });
 
         // Consultar destinos
@@ -608,9 +611,7 @@
             }
 
             ui.log(`🔍 Consultando ${coords.length} destino(s)...`, 'info');
-            const btn = document.getElementById('twb-consultar');
-            btn.disabled = true;
-            btn.textContent = '⏳ CONSULTANDO...';
+            ui.btnLoading('twb-consultar', '⏳ CONSULTANDO...');
 
             destinosConsultados = [];
             for (const coord of coords) {
@@ -654,8 +655,7 @@
                 document.getElementById('twb-calcular').disabled = false;
             }
 
-            btn.disabled = false;
-            btn.textContent = '🔍 CONSULTAR DESTINOS';
+            ui.btnRestore('twb-consultar', '🔍 CONSULTAR DESTINOS');
             ui.log('✅ Consulta concluída', 'success');
         });
 
@@ -675,6 +675,41 @@
             e.target.value = CONFIG.DELAY_ENTRE_ENVIOS;
             saveConfig();
         });
+
+        // Drag-and-drop de prioridade de recursos
+        (function() {
+            const list = document.getElementById('twb-prioridade-list');
+            if (!list) return;
+            let dragging = null;
+
+            list.addEventListener('dragstart', (e) => {
+                dragging = e.target.closest('[draggable]');
+                if (dragging) dragging.style.opacity = '0.4';
+            });
+            list.addEventListener('dragend', () => {
+                if (dragging) dragging.style.opacity = '1';
+                dragging = null;
+                // Atualizar CONFIG e salvar
+                const itens = list.querySelectorAll('[data-recurso]');
+                CONFIG.PRIORIDADE_RECURSOS = Array.from(itens).map(el => el.dataset.recurso);
+                // Atualizar números de ordem
+                itens.forEach((el, i) => {
+                    const num = el.querySelector('span:first-child');
+                    if (num) num.textContent = `${i + 1}º`;
+                });
+                saveConfig();
+                ui.log(`🎯 Prioridade: ${CONFIG.PRIORIDADE_RECURSOS.join(' → ')}`, 'info');
+            });
+            list.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                const target = e.target.closest('[draggable]');
+                if (target && target !== dragging) {
+                    const rect = target.getBoundingClientRect();
+                    const after = e.clientY > rect.top + rect.height / 2;
+                    list.insertBefore(dragging, after ? target.nextSibling : target);
+                }
+            });
+        })();
 
         // Calcular envios (COM VALIDAÇÃO)
         document.getElementById('twb-calcular').addEventListener('click', () => {
@@ -779,19 +814,12 @@
                 return;
             }
 
-            const btnExecutar = document.getElementById('twb-executar');
-            const btnCalcular = document.getElementById('twb-calcular');
-            btnExecutar.disabled = true;
-            btnCalcular.disabled = true;
-            btnExecutar.textContent = '⏳ ENVIANDO...';
+            // Usar btnLoading/btnRestore do tw-ui-kit
+            ui.btnLoading('twb-executar', '⏳ ENVIANDO...');
+            ui.btnLoading('twb-calcular', '⏳ Aguarde…');
 
-            const progressDiv = document.getElementById('twb-progresso');
-            progressDiv.innerHTML = `
-                <div style="background: ${CORES.borda}; border-radius: 4px; height: 8px; width: 100%;">
-                    <div id="twb-progress-bar" style="background: ${CORES.verde}; width: 0%; height: 8px; border-radius: 4px; transition: width 0.3s;"></div>
-                </div>
-                <div id="twb-progress-text" style="font-size: 11px; color: ${CORES.textoDim}; margin-top: 6px; text-align: center;"></div>
-            `;
+            // Iniciar barra de progresso nativa do tw-ui-kit
+            ui.setProgress(0, `0 / ${enviosCalculados.length} envios`);
 
             let sucessos = 0;
             for (let i = 0; i < enviosCalculados.length; i++) {
@@ -799,10 +827,7 @@
                 ui.log(`[${i+1}/${enviosCalculados.length}] ${envio.origemCoord} → ${envio.destinoCoord}`, 'info');
 
                 const pct = ((i + 1) / enviosCalculados.length) * 100;
-                const progressBar = document.getElementById('twb-progress-bar');
-                if (progressBar) progressBar.style.width = `${pct}%`;
-                const progressText = document.getElementById('twb-progress-text');
-                if (progressText) progressText.innerHTML = `${i+1}/${enviosCalculados.length} (${sucessos} sucessos)`;
+                ui.setProgress(pct, `${i + 1} / ${enviosCalculados.length} — ${sucessos} ✅`);
 
                 const resultado = await enviarRecursos(envio.origemId, envio.destinoId, envio.madeira, envio.argila, envio.ferro, ui);
                 if (resultado) sucessos++;
@@ -812,17 +837,19 @@
                 }
             }
 
-            const progressText = document.getElementById('twb-progress-text');
-            if (progressText) progressText.innerHTML = `✅ Concluído! ${sucessos}/${enviosCalculados.length} sucessos`;
+            // Mostrar resultado final na barra e esconder após 4s
+            const labelFinal = `✅ ${sucessos} / ${enviosCalculados.length} enviados`;
+            ui.setProgress(100, labelFinal);
             ui.log(`✅ Finalizado: ${sucessos}/${enviosCalculados.length} sucessos`, sucessos > 0 ? 'success' : 'error');
+            ui.hideProgress(4000);
 
-            btnExecutar.disabled = false;
-            btnCalcular.disabled = false;
-            btnExecutar.textContent = '🚀 EXECUTAR ENVIOS';
+            // Restaurar botões via tw-ui-kit
+            ui.btnRestore('twb-executar', '🚀 EXECUTAR ENVIOS');
+            ui.btnRestore('twb-calcular', '📊 CALCULAR ENVIOS');
         });
 
         document.getElementById('twb-close-btn').addEventListener('click', () => window.close());
-        ui.log('📤 Envio Multi-Aldeias v4.3 - Com validação origem/destino e correções!', 'success');
+        ui.log('📤 Envio Multi-Aldeias v4.4 - Com validação origem/destino e correções!', 'success');
         ui.log('💡 Se uma origem também for destino, ela é automaticamente removida', 'info');
     }
 
