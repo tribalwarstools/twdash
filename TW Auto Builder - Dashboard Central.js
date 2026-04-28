@@ -656,6 +656,22 @@
                 <button id="twb-mal-none"   class="twb-btn twb-btn-ghost">✕ Limpar Seleção</button>
                 <button id="twb-mal-reload" class="twb-btn twb-btn-secondary" style="margin-left:auto;">↻ Recarregar</button>
             </div>
+            <div style="padding:8px 18px;border-bottom:1px solid var(--twui-border);flex-shrink:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--twui-bg-card);">
+                <span style="font-size:11px;color:var(--twui-orange);font-weight:700;">🔍 Filtrar por pontuação:</span>
+                <div style="display:flex;align-items:center;gap:4px;">
+                    <span style="font-size:10px;color:var(--twui-text-dim);">Mín:</span>
+                    <input id="twb-mal-pts-min" type="number" min="0" step="100" value="0" placeholder="0"
+                        style="width:80px;padding:3px 6px;background:var(--twui-bg);border:1px solid var(--twui-border);color:var(--twui-text);border-radius:4px;font-size:11px;text-align:center;">
+                </div>
+                <div style="display:flex;align-items:center;gap:4px;">
+                    <span style="font-size:10px;color:var(--twui-text-dim);">Máx:</span>
+                    <input id="twb-mal-pts-max" type="number" min="0" step="100" value="999999" placeholder="∞"
+                        style="width:80px;padding:3px 6px;background:var(--twui-bg);border:1px solid var(--twui-border);color:var(--twui-text);border-radius:4px;font-size:11px;text-align:center;">
+                </div>
+                <button id="twb-mal-filtrar" class="twb-btn twb-btn-secondary" style="padding:4px 10px;font-size:10px;">Aplicar</button>
+                <button id="twb-mal-limpar-filtro" class="twb-btn twb-btn-ghost" style="padding:4px 10px;font-size:10px;">Limpar</button>
+                <span id="twb-mal-filtro-info" style="font-size:10px;color:var(--twui-text-dim);margin-left:auto;"></span>
+            </div>
             <div style="padding:8px 18px;border-bottom:1px solid var(--twui-border);flex-shrink:0;display:grid;grid-template-columns:30px 2fr 1fr 1fr;gap:8px;font-size:10px;color:var(--twui-orange);font-weight:700;">
                 <div></div><div>🏠 Aldeia</div><div>📍 Coordenada</div><div>📊 Pontos</div>
             </div>
@@ -676,7 +692,7 @@
         document.getElementById('twb-mal-cancelar').addEventListener('click', fecharModalAldeias);
         document.getElementById('twb-mal-salvar').addEventListener('click', salvarConfigAldeias);
         document.getElementById('twb-mal-all').addEventListener('click', () =>
-            document.querySelectorAll('#twb-mal-lista .twb-vc').forEach(cb => cb.checked = true));
+            document.querySelectorAll('#twb-mal-lista .twb-vc:not([data-hidden="true"])').forEach(cb => cb.checked = true));
         document.getElementById('twb-mal-none').addEventListener('click', () =>
             document.querySelectorAll('#twb-mal-lista .twb-vc').forEach(cb => cb.checked = false));
         document.getElementById('twb-mal-reload').addEventListener('click', async () => {
@@ -686,12 +702,54 @@
             await carregarAldeiasModal();
             btn.textContent = '↻ Recarregar'; btn.disabled = false;
         });
+        document.getElementById('twb-mal-filtrar').addEventListener('click', aplicarFiltroPontos);
+        document.getElementById('twb-mal-limpar-filtro').addEventListener('click', () => {
+            const minEl = document.getElementById('twb-mal-pts-min');
+            const maxEl = document.getElementById('twb-mal-pts-max');
+            if (minEl) minEl.value = '0';
+            if (maxEl) maxEl.value = '999999';
+            aplicarFiltroPontos();
+        });
+        document.getElementById('twb-mal-pts-min').addEventListener('keydown', e => { if (e.key === 'Enter') aplicarFiltroPontos(); });
+        document.getElementById('twb-mal-pts-max').addEventListener('keydown', e => { if (e.key === 'Enter') aplicarFiltroPontos(); });
 
         await carregarAldeiasModal();
     }
 
     function fecharModalAldeias() {
         if (modalAldeias) modalAldeias.style.display = 'none';
+    }
+
+    function aplicarFiltroPontos() {
+        const lista = document.getElementById('twb-mal-lista');
+        const infoEl = document.getElementById('twb-mal-filtro-info');
+        if (!lista) return;
+
+        const minVal = parseInt(document.getElementById('twb-mal-pts-min')?.value) || 0;
+        const maxVal = parseInt(document.getElementById('twb-mal-pts-max')?.value) || 999999;
+
+        let visiveis = 0;
+        let total = 0;
+
+        const linhas = Array.from(lista.children).filter(child => child.dataset?.villageId);
+        for (const row of linhas) {
+            const pontos = parseInt(row.dataset.pontos) || 0;
+            total++;
+            const visivel = pontos >= minVal && pontos <= maxVal;
+            row.style.display = visivel ? '' : 'none';
+            const cb = row.querySelector('.twb-vc');
+            if (cb) cb.dataset.hidden = visivel ? 'false' : 'true';
+            if (visivel) visiveis++;
+        }
+
+        if (infoEl) {
+            if (minVal === 0 && maxVal === 999999) {
+                infoEl.textContent = `${total} aldeia(s)`;
+            } else {
+                infoEl.textContent = `${visiveis} de ${total} aldeia(s) visíveis`;
+                infoEl.style.color = visiveis === 0 ? 'var(--twui-red)' : 'var(--twui-green)';
+            }
+        }
     }
 
     async function carregarAldeiasModal() {
@@ -707,6 +765,7 @@
                 const isSelected = !!configAldeias[a.id];
                 const row = document.createElement('div');
                 row.dataset.villageId = a.id;
+                row.dataset.pontos = a.pontos;
                 row.style.cssText = 'background:var(--twui-bg-card);border:1px solid var(--twui-border);border-radius:6px;padding:8px 12px;display:grid;grid-template-columns:30px 2fr 1fr 1fr;gap:8px;align-items:center;';
 
                 const cb = document.createElement('input');
@@ -735,6 +794,9 @@
         } catch(err) {
             lista.innerHTML = `<div style="color:var(--twui-red);font-size:12px;text-align:center;padding:20px 0;">❌ Erro: ${err.message}</div>`;
         }
+
+        // Reaplicar filtro de pontos caso já tenha sido definido
+        aplicarFiltroPontos();
     }
 
     function salvarConfigAldeias() {
