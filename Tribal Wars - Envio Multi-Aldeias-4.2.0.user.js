@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tribal Wars - Envio Multi-Aldeias
 // @namespace    https://github.com/tribalwarstools
-// @version      4.4.0
-// @description  Com validação: não enviar de uma aldeia para ela mesma
+// @version      5.0.0
+// @description  Envio de recursos para suas aldeias e aldeias de outros jogadores via village.txt/player.txt
 // @author       DeepSeek
 // @match        https://*.tribalwars.com.br/game.php*
 // @match        https://*.tribalwars.com/game.php*
@@ -19,48 +19,38 @@
     'use strict';
 
     const DASHBOARD_PARAM = 'twMultiSend=true';
-    const STORAGE_KEY = 'TW_MULTI_SEND_CONFIG';
-    // FIX #11: Usar a constante onde era hard-coded 1000
+    const STORAGE_KEY     = 'TW_MULTI_SEND_CONFIG_V5';
     const MAX_POR_MERCADOR = 1000;
-    const FETCH_TIMEOUT_MS = 10000;
+    const FETCH_TIMEOUT_MS = 15000;
 
+    // ==================== CONFIG ====================
     const CONFIG = {
         DELAY_ENTRE_ENVIOS: 800,
         PERCENTUAL_ARMAZEM_DESTINO: 80,
-        // Ordem de prioridade dos recursos (primeiro = maior prioridade quando mercadores são limitados)
-        PRIORIDADE_RECURSOS: ['madeira', 'argila', 'ferro']
+        PRIORIDADE_RECURSOS: ['madeira', 'argila', 'ferro'],
+        ARMAZEM_PADRAO_EXTERNO: 30000   // usado quando armazém do destino externo é desconhecido
     };
 
     function saveConfig() {
         GM_setValue(STORAGE_KEY, JSON.stringify(CONFIG));
     }
 
-    // FIX #8: catch com aviso em vez de silêncio total
     try {
         const saved = GM_getValue(STORAGE_KEY);
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            Object.assign(CONFIG, parsed);
-        }
+        if (saved) Object.assign(CONFIG, JSON.parse(saved));
     } catch(e) {
-        console.warn('[TW Multi-Aldeias] Falha ao carregar configuração salva, usando padrões.', e);
+        console.warn('[TW Multi-Aldeias] Config inválida, usando padrões.', e);
     }
 
+    // ==================== CORES ====================
     const CORES = {
-        fundo: '#080c10',
-        fundoCard: '#0d1117',
-        verde: '#00d97e',
-        texto: '#c9d1d9',
-        textoDim: '#8b949e',
-        borda: '#21262d',
-        erro: '#f85149',
-        aviso: '#d29922',
-        info: '#388bfd',
-        madeira: '#d4a72c',
-        argila: '#7e8c8d',
-        ferro: '#8b9dc3'
+        fundo: '#080c10', fundoCard: '#0d1117',
+        verde: '#00d97e', texto: '#c9d1d9', textoDim: '#8b949e',
+        borda: '#21262d', erro: '#f85149', aviso: '#d29922',
+        info: '#388bfd', madeira: '#d4a72c', argila: '#7e8c8d', ferro: '#8b9dc3'
     };
 
+    // ==================== UTILITÁRIOS ====================
     function isPremium() {
         if (typeof premium !== 'undefined' && premium === true) return true;
         if (window.game_data?.features?.Premium?.active === true) return true;
@@ -68,7 +58,11 @@
         return false;
     }
 
-    // FIX #9: fetch com AbortController para timeout
+    function getWorldUrl() {
+        // Extrai base da URL do mundo atual ex: https://br95.tribalwars.com.br
+        return window.location.origin;
+    }
+
     async function fetchComTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -80,22 +74,86 @@
         }
     }
 
-    // ==================== EXTRAIR ALDEIAS ====================
-    async function extrairAldeias(ui) {
-        if (ui) ui.log('📡 Buscando aldeias...', 'info');
+    // ==================== MAPA PÚBLICO (village.txt / player.txt) ====================
+    // Cache em memória durante a sessão
+    let _mapaAldeias = null;   // Map: coord -> { id, nome, x, y, playerId, pontos }
+    let _mapaJogadores = null; // Map: playerId -> nomeJogador
 
-        const premiumAtivo = isPremium();
-        const url = `/game.php?screen=overview_villages&mode=prod&group=0&page=-1`;
+    async function carregarMapaPublico(ui) {
+        if (_mapaAldeias) return true; // já carregado
 
         try {
-            // FIX #9: timeout no fetch
+            if (ui) ui.log('🌐 Carregando mapa público (village.txt)...', 'info');
+
+            const base = getWorldUrl();
+            // village.txt: id,nome,x,y,player_id,pontos,rank
+            const [resVillage, resPlayer] = await Promise.all([
+                fetchComTimeout(base + '/map/village.txt'),
+                fetchComTimeout(base + '/map/player.txt')
+            ]);
+
+            const txtVillage = await resVillage.text();
+            const txtPlayer  = await resPlayer.text();
+
+            // Montar mapa de jogadores: id -> nome
+            _mapaJogadores = new Map();
+            for (const linha of txtPlayer.split('\n')) {
+                const p = linha.trim().split(',');
+                if (p.length >= 2) {
+                    _mapaJogadores.set(p[0], decodeURIComponent(p[1].replace(/\+/g, ' ')));
+                }
+            }
+
+            // Montar mapa de aldeias: "x|y" -> objeto
+            _mapaAldeias = new Map();
+            for (const linha of txtVillage.split('\n')) {
+                const v = linha.trim().split(',');
+                if (v.length >= 6) {
+                    const x = parseInt(v[2]);
+                    const y = parseInt(v[3]);
+                    const coord = x + '|' + y;
+                    _mapaAldeias.set(coord, {
+                        id:       parseInt(v[0]),
+                        nome:     decodeURIComponent(v[1].replace(/\+/g, ' ')),
+                        x, y,
+                        playerId: v[4],
+                        pontos:   parseInt(v[5]) || 0,
+                        jogador:  _mapaJogadores.get(v[4]) || '—'
+                    });
+                }
+            }
+
+            if (ui) ui.log('✅ Mapa carregado: ' + _mapaAldeias.size + ' aldeias', 'success');
+            return true;
+
+        } catch(err) {
+            const msg = err.name === 'AbortError' ? 'Timeout ao carregar mapa' : err.message;
+            if (ui) ui.log('❌ Falha ao carregar mapa: ' + msg, 'error');
+            return false;
+        }
+    }
+
+    // Busca uma aldeia no mapa público pelo coord
+    function buscarAldeiaNoMapa(coord) {
+        if (!_mapaAldeias) return null;
+        return _mapaAldeias.get(coord) || null;
+    }
+
+    // ==================== EXTRAIR MINHAS ALDEIAS ====================
+    async function extrairMinhasAldeias(ui) {
+        if (ui) ui.log('📡 Buscando suas aldeias...', 'info');
+
+        const premiumAtivo = isPremium();
+        const url = '/game.php?screen=overview_villages&mode=prod&group=0&page=-1';
+
+        try {
             const response = await fetchComTimeout(url);
             const html = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
 
             const tabela = doc.getElementById('production_table');
-            if (!tabela) throw new Error('Tabela não encontrada');
+            if (!tabela) throw new Error('Tabela de produção não encontrada');
 
             const linhas = Array.from(tabela.querySelectorAll('tr')).filter(tr =>
                 tr.querySelector('a[href*="screen=overview"]') && !tr.querySelector('th')
@@ -109,25 +167,23 @@
                 if (!linkVila) continue;
 
                 const celulas = linha.cells;
-                // FIX #1: usar textContent em vez de innerText (documentos DOMParser não suportam innerText)
                 const textoAldeia = (celulas[offset]?.textContent || '').trim();
                 const coordsMatch = textoAldeia.match(/(\d+)\|(\d+)/);
                 const x = coordsMatch ? parseInt(coordsMatch[1]) : 0;
                 const y = coordsMatch ? parseInt(coordsMatch[2]) : 0;
-                const coord = `${x}|${y}`;
+                const coord = x + '|' + y;
                 const nome = textoAldeia.split('(')[0].trim();
                 const pontos = parseInt((celulas[offset + 1]?.textContent || '0').replace(/\./g, ''));
 
-                const resTexto = (celulas[offset + 2]?.textContent || '0').replace(/\./g, '');
+                const resTexto = (celulas[offset + 2]?.textContent || '').replace(/\./g, '');
                 const resNums = resTexto.match(/\d+/g) || [0, 0, 0];
                 const madeira = parseInt(resNums[0] || 0);
-                const argila = parseInt(resNums[1] || 0);
-                const ferro = parseInt(resNums[2] || 0);
+                const argila  = parseInt(resNums[1] || 0);
+                const ferro   = parseInt(resNums[2] || 0);
                 const armazem = parseInt((celulas[offset + 3]?.textContent || '0').replace(/\./g, ''));
 
                 let comerciantesDisp = 0, comerciantesTotal = 0;
                 if (premiumAtivo && celulas[offset + 4]) {
-                    // FIX #1: textContent em vez de innerText
                     const comerMatch = (celulas[offset + 4].textContent || '').trim().match(/(\d+)\/(\d+)/);
                     if (comerMatch) {
                         comerciantesDisp = parseInt(comerMatch[1]);
@@ -141,115 +197,102 @@
                 if (id > 0) {
                     aldeias.push({
                         id, nome, coord, x, y, pontos,
-                        madeira, argila, ferro,
-                        armazem,
-                        comerciantesDisp, comerciantesTotal
+                        madeira, argila, ferro, armazem,
+                        comerciantesDisp, comerciantesTotal,
+                        proprio: true
                     });
                 }
             }
 
+            // Não-premium: buscar comerciantes individualmente
             if (!premiumAtivo && aldeias.length > 0) {
-                if (ui) ui.log('🐌 Buscando comerciantes...', 'info');
+                if (ui) ui.log('🐌 Buscando comerciantes (sem premium)...', 'info');
                 for (const aldeia of aldeias) {
-                    const comer = await buscarComerciantesPorAldeia(aldeia.id);
-                    aldeia.comerciantesDisp = comer.disp;
-                    aldeia.comerciantesTotal = comer.total;
+                    const c = await buscarComerciantesPorAldeia(aldeia.id);
+                    aldeia.comerciantesDisp  = c.disp;
+                    aldeia.comerciantesTotal = c.total;
                     await new Promise(r => setTimeout(r, 60));
                 }
             }
 
-            if (ui) ui.log(`✅ ${aldeias.length} aldeias encontradas`, 'success');
+            if (ui) ui.log('✅ ' + aldeias.length + ' aldeias suas carregadas', 'success');
             return aldeias;
 
-        } catch (err) {
-            // FIX #9: identificar timeout explicitamente
-            const msg = err.name === 'AbortError' ? 'Timeout ao carregar aldeias' : err.message;
-            if (ui) ui.log(`❌ Erro: ${msg}`, 'error');
+        } catch(err) {
+            const msg = err.name === 'AbortError' ? 'Timeout' : err.message;
+            if (ui) ui.log('❌ Erro ao carregar aldeias: ' + msg, 'error');
             return [];
         }
     }
 
     async function buscarComerciantesPorAldeia(villageId) {
         try {
-            const url = `/game.php?village=${villageId}&screen=market`;
-            // FIX #9: timeout no fetch
+            const url = '/game.php?village=' + villageId + '&screen=market';
             const response = await fetchComTimeout(url);
             const html = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
 
             const availableSpan = doc.getElementById('market_merchant_available_count');
-            const totalSpan = doc.getElementById('market_merchant_total_count');
+            const totalSpan     = doc.getElementById('market_merchant_total_count');
 
             if (availableSpan && totalSpan) {
-                // FIX #1: textContent em vez de innerText
                 return {
-                    disp: parseInt((availableSpan.textContent || '').trim()) || 0,
+                    disp:  parseInt((availableSpan.textContent || '').trim()) || 0,
                     total: parseInt((totalSpan.textContent || '').trim()) || 0
                 };
             }
             return { disp: 0, total: 0 };
-        } catch (err) {
+        } catch(err) {
             return { disp: 0, total: 0 };
         }
     }
 
-    // ==================== CONSULTAR DESTINO ====================
-    async function consultarDestino(coord, minhasAldeias = []) {
-        const minhaAldeia = minhasAldeias.find(a => a.coord === coord);
-        if (minhaAldeia) {
+    // ==================== RESOLVER DESTINO ====================
+    // Resolve um coord para { id, nome, jogador, proprio, armazem, ... }
+    // Usa mapa público para qualquer aldeia; busca armazém só das próprias.
+    function resolverDestino(coord, minhasAldeias, armazemManual) {
+        // 1. Verificar se é uma aldeia própria
+        const propria = minhasAldeias.find(a => a.coord === coord);
+        if (propria) {
             return {
                 coord,
-                id: minhaAldeia.id,
-                armazem: minhaAldeia.armazem,
-                madeira: minhaAldeia.madeira,
-                argila: minhaAldeia.argila,
-                ferro: minhaAldeia.ferro,
+                id:       propria.id,
+                nome:     propria.nome,
+                jogador:  'Você',
+                proprio:  true,
+                armazem:  propria.armazem,
+                madeira:  propria.madeira,
+                argila:   propria.argila,
+                ferro:    propria.ferro,
                 encontrado: true
             };
         }
 
-        try {
-            const [x, y] = coord.split('|');
-            const url = `/game.php?screen=info_village&mode=found&x=${x}&y=${y}`;
-            // FIX #9: timeout no fetch
-            const response = await fetchComTimeout(url);
-            const html = await response.text();
-
-            // Buscar ID via regex
-            const idMatch = html.match(/village=(\d+)/);
-            if (!idMatch) return { coord, encontrado: false };
-
-            // FIX #3: usar DOMParser para extrair armazém em vez de regex frágil
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
-
-            let armazem = 0;
-
-            // Tenta via seletor semântico primeiro
-            const spanArmazem = doc.querySelector('[data-type="warehouse"] .res, .warehouse .res');
-            if (spanArmazem) {
-                armazem = parseInt((spanArmazem.textContent || '').replace(/\./g, '')) || 0;
-            }
-
-            // Fallback para regex como segunda opção
-            if (!armazem) {
-                const warehouseMatch = html.match(/armaz[ée]m[^<]*<\/span>\s*<span[^>]*>([\d.]+)<\/span>/i);
-                if (warehouseMatch) {
-                    armazem = parseInt(warehouseMatch[1].replace(/\./g, '')) || 0;
-                }
-            }
-
-            return {
-                coord,
-                id: parseInt(idMatch[1]),
-                armazem,
-                madeira: 0, argila: 0, ferro: 0,
-                encontrado: armazem > 0
-            };
-        } catch (err) {
-            return { coord, encontrado: false };
+        // 2. Buscar no mapa público
+        const mapInfo = buscarAldeiaNoMapa(coord);
+        if (!mapInfo) {
+            return { coord, encontrado: false, motivo: 'Coordenada não encontrada no mapa' };
         }
+
+        // Armazém: usa manual se informado, senão usa padrão configurado
+        const armazem = (armazemManual && armazemManual > 0)
+            ? armazemManual
+            : CONFIG.ARMAZEM_PADRAO_EXTERNO;
+
+        return {
+            coord,
+            id:        mapInfo.id,
+            nome:      mapInfo.nome,
+            jogador:   mapInfo.jogador,
+            proprio:   false,
+            armazem,
+            armazemEstimado: !(armazemManual && armazemManual > 0),
+            madeira:   0,
+            argila:    0,
+            ferro:     0,
+            encontrado: true
+        };
     }
 
     // ==================== CALCULAR DISTRIBUIÇÃO ====================
@@ -259,112 +302,106 @@
         );
 
         if (origensViaveis.length === 0) {
-            ui.log('❌ Nenhuma origem disponível', 'error');
+            ui.log('❌ Nenhuma origem com recursos e mercadores disponíveis', 'error');
             return [];
         }
 
         origensViaveis = origensViaveis.map(o => ({ ...o }));
         const envios = [];
-        const percDestino = CONFIG.PERCENTUAL_ARMAZEM_DESTINO / 100;
+        const perc   = CONFIG.PERCENTUAL_ARMAZEM_DESTINO / 100;
 
         for (const destino of destinos) {
-            // FIX #2: destino sem id (armazém manual) não pode ser enviado
-            if (!destino.encontrado || !destino.armazem) {
-                ui.log(`⚠️ Destino ${destino.coord} não encontrado`, 'warning');
-                continue;
-            }
-            if (!destino.id) {
-                ui.log(`⚠️ Destino ${destino.coord} sem ID — informe o armazém e consulte novamente`, 'warning');
+            if (!destino.encontrado) {
+                ui.log('⚠️ Destino ' + destino.coord + ' não encontrado: ' + (destino.motivo || ''), 'warning');
                 continue;
             }
 
-            const capacidadePorRecurso = destino.armazem;
-            const metaPorRecurso = Math.floor(capacidadePorRecurso * percDestino);
+            const meta = Math.floor(destino.armazem * perc);
+            let necMadeira = Math.max(0, meta - destino.madeira);
+            let necArgila  = Math.max(0, meta - destino.argila);
+            let necFerro   = Math.max(0, meta - destino.ferro);
 
-            let necessidadeMadeira = Math.max(0, metaPorRecurso - destino.madeira);
-            let necessidadeArgila = Math.max(0, metaPorRecurso - destino.argila);
-            let necessidadeFerro = Math.max(0, metaPorRecurso - destino.ferro);
-
-            if (necessidadeMadeira + necessidadeArgila + necessidadeFerro <= 0) {
-                ui.log(`ℹ️ ${destino.coord} já está balanceado`, 'info');
+            if (necMadeira + necArgila + necFerro === 0) {
+                ui.log('ℹ️ ' + destino.coord + ' já está no alvo', 'info');
                 continue;
             }
 
-            // FIX #4: avisar sobre necessidades menores que 1 mercador
-            const necessidadeTotal = necessidadeMadeira + necessidadeArgila + necessidadeFerro;
-            const necessidadeArredondada =
-                Math.floor(necessidadeMadeira / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
-                Math.floor(necessidadeArgila / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
-                Math.floor(necessidadeFerro / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
-            if (necessidadeArredondada === 0 && necessidadeTotal > 0) {
-                ui.log(`ℹ️ ${destino.coord}: necessidade (${necessidadeTotal}) < 1 mercador (${MAX_POR_MERCADOR}) — ignorado`, 'info');
+            // Avisar sobre armazém estimado
+            if (destino.armazemEstimado) {
+                ui.log('⚠️ ' + destino.coord + ' (' + destino.jogador + '): armazém estimado em ' + destino.armazem.toLocaleString() + '. Informe o real para precisão.', 'warning');
+            }
+
+            // Checar se há algum recurso acima de 1 mercador
+            const necArred =
+                Math.floor(necMadeira / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
+                Math.floor(necArgila  / MAX_POR_MERCADOR) * MAX_POR_MERCADOR +
+                Math.floor(necFerro   / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
+            if (necArred === 0) {
+                ui.log('ℹ️ ' + destino.coord + ': necessidade < 1 mercador — ignorado', 'info');
                 continue;
             }
 
-            ui.log(`📦 ${destino.coord}: 🌲+${necessidadeMadeira.toLocaleString()} 🧱+${necessidadeArgila.toLocaleString()} ⚙️+${necessidadeFerro.toLocaleString()}`, 'info');
+            ui.log('📦 ' + destino.coord + ' (' + destino.jogador + '): 🌲+' + necMadeira.toLocaleString() + ' 🧱+' + necArgila.toLocaleString() + ' ⚙️+' + necFerro.toLocaleString(), 'info');
 
             for (const origem of origensViaveis) {
-                if (necessidadeMadeira <= 0 && necessidadeArgila <= 0 && necessidadeFerro <= 0) break;
+                if (necMadeira <= 0 && necArgila <= 0 && necFerro <= 0) break;
                 if (origem.comerciantesDisp <= 0) continue;
+                // Não enviar de origem para ela mesma
+                if (origem.coord === destino.coord) continue;
 
                 let mercadoresUsados = 0;
-
-                // Processar recursos na ordem de prioridade configurada pelo usuário (#5)
-                const necessidades = { madeira: necessidadeMadeira, argila: necessidadeArgila, ferro: necessidadeFerro };
-                const estoqueOrigem = { madeira: origem.madeira, argila: origem.argila, ferro: origem.ferro };
-                const envios_res = { madeira: 0, argila: 0, ferro: 0 };
+                const nec      = { madeira: necMadeira, argila: necArgila, ferro: necFerro };
+                const estoque  = { madeira: origem.madeira, argila: origem.argila, ferro: origem.ferro };
+                const enviados = { madeira: 0, argila: 0, ferro: 0 };
 
                 for (const recurso of CONFIG.PRIORIDADE_RECURSOS) {
                     if (mercadoresUsados >= origem.comerciantesDisp) break;
-                    if (necessidades[recurso] <= 0 || estoqueOrigem[recurso] <= 0) continue;
+                    if (nec[recurso] <= 0 || estoque[recurso] <= 0) continue;
 
-                    let enviar = Math.min(necessidades[recurso], estoqueOrigem[recurso]);
-                    enviar = Math.floor(enviar / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
-                    let mercsNecessarios = enviar / MAX_POR_MERCADOR;
-                    const mercsRestantes = origem.comerciantesDisp - mercadoresUsados;
+                    let qtd = Math.min(nec[recurso], estoque[recurso]);
+                    qtd = Math.floor(qtd / MAX_POR_MERCADOR) * MAX_POR_MERCADOR;
+                    let mercs = qtd / MAX_POR_MERCADOR;
+                    const mercsLivres = origem.comerciantesDisp - mercadoresUsados;
 
-                    // FIX #6: envio parcial se não há mercadores suficientes
-                    if (mercsNecessarios > mercsRestantes) {
-                        mercsNecessarios = mercsRestantes;
-                        enviar = mercsNecessarios * MAX_POR_MERCADOR;
+                    if (mercs > mercsLivres) {
+                        mercs = mercsLivres;
+                        qtd   = mercs * MAX_POR_MERCADOR;
                     }
 
-                    if (enviar > 0) {
-                        envios_res[recurso] = enviar;
-                        mercadoresUsados += mercsNecessarios;
-                        necessidades[recurso] -= enviar;
-                        estoqueOrigem[recurso] -= enviar;
+                    if (qtd > 0) {
+                        enviados[recurso]  = qtd;
+                        mercadoresUsados  += mercs;
+                        nec[recurso]      -= qtd;
+                        estoque[recurso]  -= qtd;
                     }
                 }
 
-                // Propagar de volta para as variáveis de necessidade e estoque da origem
-                necessidadeMadeira = necessidades.madeira;
-                necessidadeArgila  = necessidades.argila;
-                necessidadeFerro   = necessidades.ferro;
-                origem.madeira = estoqueOrigem.madeira;
-                origem.argila  = estoqueOrigem.argila;
-                origem.ferro   = estoqueOrigem.ferro;
+                // Propagar de volta
+                necMadeira    = nec.madeira;
+                necArgila     = nec.argila;
+                necFerro      = nec.ferro;
+                origem.madeira = estoque.madeira;
+                origem.argila  = estoque.argila;
+                origem.ferro   = estoque.ferro;
+                origem.comerciantesDisp -= mercadoresUsados;
 
-                const madeiraEnvio = envios_res.madeira;
-                const argilaEnvio  = envios_res.argila;
-                const ferroEnvio   = envios_res.ferro;
-
-                if (madeiraEnvio > 0 || argilaEnvio > 0 || ferroEnvio > 0) {
+                if (enviados.madeira > 0 || enviados.argila > 0 || enviados.ferro > 0) {
                     envios.push({
-                        origemId: origem.id,
-                        origemNome: origem.nome,
+                        origemId:    origem.id,
+                        origemNome:  origem.nome,
                         origemCoord: origem.coord,
-                        destinoId: destino.id,
+                        destinoId:   destino.id,
+                        destinoNome: destino.nome,
                         destinoCoord: destino.coord,
-                        madeira: madeiraEnvio,
-                        argila: argilaEnvio,
-                        ferro: ferroEnvio,
-                        total: madeiraEnvio + argilaEnvio + ferroEnvio,
+                        destinoJogador: destino.jogador,
+                        destinoProprio: destino.proprio,
+                        madeira:  enviados.madeira,
+                        argila:   enviados.argila,
+                        ferro:    enviados.ferro,
+                        total:    enviados.madeira + enviados.argila + enviados.ferro,
                         mercadores: mercadoresUsados
                     });
                 }
-
-                origem.comerciantesDisp -= mercadoresUsados;
             }
         }
 
@@ -372,135 +409,133 @@
     }
 
     // ==================== ENVIAR RECURSOS ====================
-    // FIX #10: retry em caso de falha temporária
     function enviarRecursos(sourceID, targetID, wood, stone, iron, ui, tentativa = 1) {
         return new Promise((resolve) => {
-            if (wood + stone + iron === 0) {
+            if (wood + stone + iron === 0) { resolve(false); return; }
+
+            if (typeof TribalWars === 'undefined' || !TribalWars.post) {
+                ui.log('⚠️ API TribalWars não disponível', 'warning');
                 resolve(false);
                 return;
             }
 
-            const dados = { target_id: targetID, wood, stone, iron };
-
-            if (typeof TribalWars !== 'undefined' && TribalWars.post) {
-                TribalWars.post("market", {
-                    ajaxaction: "map_send",
-                    village: sourceID
-                }, dados, function(response) {
-                    if (response?.error) {
-                        ui.log(`❌ ${response.error}`, 'error');
-                        resolve(false);
-                    } else {
-                        ui.log(`✅ Enviado: 🌲${wood.toLocaleString()} 🧱${stone.toLocaleString()} ⚙️${iron.toLocaleString()}`, 'success');
-                        resolve(true);
-                    }
-                }, function(error) {
-                    if (tentativa < 2) {
-                        ui.log(`⚠️ Falha temporária, tentando novamente... (tentativa ${tentativa})`, 'warning');
-                        setTimeout(() => {
-                            enviarRecursos(sourceID, targetID, wood, stone, iron, ui, tentativa + 1).then(resolve);
-                        }, 1500);
-                    } else {
-                        ui.log(`❌ Erro após ${tentativa} tentativas: ${error}`, 'error');
-                        resolve(false);
-                    }
-                });
-            } else {
-                ui.log(`⚠️ API TribalWars não disponível`, 'warning');
-                resolve(false);
-            }
+            TribalWars.post('market', {
+                ajaxaction: 'map_send',
+                village: sourceID
+            }, {
+                target_id: targetID,
+                wood: wood, stone: stone, iron: iron
+            }, function(response) {
+                if (response?.error) {
+                    ui.log('❌ ' + response.error, 'error');
+                    resolve(false);
+                } else {
+                    ui.log('✅ Enviado: 🌲' + wood.toLocaleString() + ' 🧱' + stone.toLocaleString() + ' ⚙️' + iron.toLocaleString(), 'success');
+                    resolve(true);
+                }
+            }, function(error) {
+                if (tentativa < 2) {
+                    ui.log('⚠️ Falha temporária, tentando novamente...', 'warning');
+                    setTimeout(() => {
+                        enviarRecursos(sourceID, targetID, wood, stone, iron, ui, tentativa + 1).then(resolve);
+                    }, 1500);
+                } else {
+                    ui.log('❌ Erro após ' + tentativa + ' tentativas: ' + error, 'error');
+                    resolve(false);
+                }
+            });
         });
     }
 
-    // ==================== TELA PRINCIPAL ====================
+    // ==================== DASHBOARD ====================
     function renderizarDashboard() {
         document.body.innerHTML = '';
-        document.body.style.cssText = `background: ${CORES.fundo}; margin: 0; padding: 0; overflow: auto; height: 100vh; font-family: monospace;`;
+        document.body.style.cssText = 'background:' + CORES.fundo + ';margin:0;padding:0;overflow:auto;height:100vh;font-family:monospace;';
 
         const ui = TWUI.create('twb');
         ui.injectStyles();
         ui.renderApp();
 
-        ui.header('📤 Envio Multi-Aldeias v4.4', 'Validação: origem não pode ser igual ao destino',
-            `<button id="twb-close-btn" style="background:${CORES.erro}22;border:1px solid ${CORES.erro}44;color:${CORES.erro};padding:4px 10px;border-radius:4px;cursor:pointer;">✕ Fechar</button>`
+        ui.header('📤 Envio Multi-Aldeias v5.0',
+            'Suporta aldeias próprias, aliadas e inimigas via mapa público',
+            '<button id="twb-close-btn" style="background:' + CORES.erro + '22;border:1px solid ' + CORES.erro + '44;color:' + CORES.erro + ';padding:4px 10px;border-radius:4px;cursor:pointer;">✕ Fechar</button>'
         );
 
-        // Barra de progresso nativa do tw-ui-kit (oculta por padrão, ativada durante envios)
         ui.progressBar();
 
         ui.mainLayout(`
-            <div style="display: flex; gap: 20px; padding: 0 0 20px 0; flex-wrap: wrap;">
+            <div style="display:flex;gap:20px;padding:0 0 20px 0;flex-wrap:wrap;">
 
-                <!-- COLUNA ESQUERDA: ORIGENS -->
-                <div style="flex: 2; min-width: 400px;">
-                    <div style="background: ${CORES.fundoCard}; border-radius: 12px; border: 1px solid ${CORES.borda}; overflow: hidden;">
-                        <div style="padding: 12px 16px; background: ${CORES.fundo}; border-bottom: 1px solid ${CORES.borda};">
-                            <h3 style="margin: 0; color: ${CORES.verde};">✅ Selecionar Aldeias de ORIGEM</h3>
+                <!-- ORIGENS -->
+                <div style="flex:2;min-width:400px;">
+                    <div style="background:${CORES.fundoCard};border-radius:12px;border:1px solid ${CORES.borda};overflow:hidden;">
+                        <div style="padding:12px 16px;background:${CORES.fundo};border-bottom:1px solid ${CORES.borda};">
+                            <h3 style="margin:0;color:${CORES.verde};">✅ Aldeias de Origem (suas)</h3>
                         </div>
-                        <div style="padding: 12px;">
-                            <button id="twb-btn-load" class="twb-btn twb-btn-primary" style="margin-bottom: 12px;">📡 CARREGAR ALDEIAS</button>
-                            <div id="twb-origens-list" style="max-height: 450px; overflow-y: auto; scrollbar-width: thin;">
-                                <div style="color: ${CORES.textoDim}; text-align: center; padding: 20px;">Clique em "CARREGAR ALDEIAS"</div>
+                        <div style="padding:12px;">
+                            <button id="twb-btn-load" class="twb-btn twb-btn-primary" style="margin-bottom:12px;">📡 CARREGAR ALDEIAS</button>
+                            <div id="twb-origens-list" style="max-height:450px;overflow-y:auto;scrollbar-width:thin;">
+                                <div style="color:${CORES.textoDim};text-align:center;padding:20px;">Clique em "CARREGAR ALDEIAS"</div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- COLUNA DIREITA: DESTINOS -->
-                <div style="flex: 1; min-width: 350px;">
-                    <div style="background: ${CORES.fundoCard}; border-radius: 12px; border: 1px solid ${CORES.borda}; overflow: hidden; margin-bottom: 20px;">
-                        <div style="padding: 12px 16px; background: ${CORES.fundo}; border-bottom: 1px solid ${CORES.borda};">
-                            <h3 style="margin: 0; color: ${CORES.verde};">🎯 Destinos</h3>
+                <!-- DESTINOS + CONFIG -->
+                <div style="flex:1;min-width:350px;display:flex;flex-direction:column;gap:20px;">
+
+                    <!-- DESTINOS -->
+                    <div style="background:${CORES.fundoCard};border-radius:12px;border:1px solid ${CORES.borda};overflow:hidden;">
+                        <div style="padding:12px 16px;background:${CORES.fundo};border-bottom:1px solid ${CORES.borda};">
+                            <h3 style="margin:0;color:${CORES.verde};">🎯 Destinos</h3>
                         </div>
-                        <div style="padding: 12px;">
-                            <label style="color: ${CORES.textoDim}; font-size: 11px;">Coordenadas (uma por linha)</label>
-                            <textarea id="twb-destinos-text" rows="5" style="
-                                width: 100%; box-sizing: border-box;
-                                background: ${CORES.fundo}; border: 1px solid ${CORES.borda};
-                                color: ${CORES.texto}; border-radius: 6px; padding: 8px;
-                                font-family: monospace; font-size: 12px;
-                                resize: vertical;
-                            " placeholder="123|456&#10;789|012"></textarea>
+                        <div style="padding:12px;">
+                            <label style="color:${CORES.textoDim};font-size:11px;">Coordenadas (uma por linha) — qualquer aldeia do mapa</label>
+                            <textarea id="twb-destinos-text" rows="6" style="width:100%;box-sizing:border-box;background:${CORES.fundo};border:1px solid ${CORES.borda};color:${CORES.texto};border-radius:6px;padding:8px;font-family:monospace;font-size:12px;resize:vertical;margin-top:4px;" placeholder="123|456&#10;789|012&#10;555|777"></textarea>
 
-                            <label style="color: ${CORES.textoDim}; font-size: 11px; margin-top: 12px; display: block;">📦 Armazém (se não for sua aldeia)</label>
-                            <input type="number" id="twb-armazem-manual" step="1000" min="0"
-                                placeholder="Digite o tamanho do armazém"
-                                style="width: 100%; box-sizing: border-box;
-                                    background: ${CORES.fundo}; border: 1px solid ${CORES.borda};
-                                    color: ${CORES.texto}; border-radius: 6px; padding: 8px;
-                                    font-family: monospace; font-size: 12px;">
+                            <div style="margin-top:10px;">
+                                <label style="color:${CORES.textoDim};font-size:11px;">📦 Armazém dos destinos externos (opcional)</label>
+                                <div style="font-size:10px;color:${CORES.textoDim};margin-bottom:4px;">Se não informar, usa o padrão configurado em ⚙️</div>
+                                <input type="number" id="twb-armazem-manual" step="1000" min="0"
+                                    placeholder="Ex: 30000"
+                                    style="width:100%;box-sizing:border-box;background:${CORES.fundo};border:1px solid ${CORES.borda};color:${CORES.texto};border-radius:6px;padding:8px;font-family:monospace;font-size:12px;">
+                            </div>
 
-                            <button id="twb-consultar" class="twb-btn twb-btn-secondary" style="margin-top: 12px; width: 100%;">🔍 CONSULTAR DESTINOS</button>
-                            <div id="twb-destinos-info" style="margin-top: 12px; font-size: 11px; max-height: 200px; overflow-y: auto; scrollbar-width: thin;"></div>
+                            <button id="twb-consultar" class="twb-btn twb-btn-secondary" style="margin-top:12px;width:100%;">🔍 CONSULTAR DESTINOS</button>
+                            <div id="twb-destinos-info" style="margin-top:12px;font-size:11px;max-height:250px;overflow-y:auto;scrollbar-width:thin;"></div>
                         </div>
                     </div>
 
-                    <!-- Configurações -->
-                    <div style="background: ${CORES.fundoCard}; border-radius: 12px; border: 1px solid ${CORES.borda}; overflow: hidden;">
-                        <div style="padding: 12px 16px; background: ${CORES.fundo}; border-bottom: 1px solid ${CORES.borda};">
-                            <h3 style="margin: 0; color: ${CORES.verde};">⚙️ Configurações</h3>
+                    <!-- CONFIG -->
+                    <div style="background:${CORES.fundoCard};border-radius:12px;border:1px solid ${CORES.borda};overflow:hidden;">
+                        <div style="padding:12px 16px;background:${CORES.fundo};border-bottom:1px solid ${CORES.borda};">
+                            <h3 style="margin:0;color:${CORES.verde};">⚙️ Configurações</h3>
                         </div>
-                        <div style="padding: 12px;">
-                            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
-                                <span>📦 % uso do armazém (por recurso):</span>
-                                <input type="number" id="twb-percentual"
-                                    value="${CONFIG.PERCENTUAL_ARMAZEM_DESTINO}"
-                                    min="10" max="100" step="5"
-                                    style="width: 60px; background: ${CORES.fundo}; border: 1px solid ${CORES.borda};
-                                        color: ${CORES.texto}; border-radius: 4px; padding: 4px; text-align: center;">
+                        <div style="padding:12px;display:flex;flex-direction:column;gap:10px;">
+
+                            <label style="display:flex;align-items:center;gap:8px;font-size:12px;">
+                                <span>📦 % armazém destino:</span>
+                                <input type="number" id="twb-percentual" value="${CONFIG.PERCENTUAL_ARMAZEM_DESTINO}" min="10" max="100" step="5"
+                                    style="width:60px;background:${CORES.fundo};border:1px solid ${CORES.borda};color:${CORES.texto};border-radius:4px;padding:4px;text-align:center;">
                                 <span>%</span>
                             </label>
-                            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; margin-top: 8px;">
-                                <span>⏱️ Delay entre envios (ms):</span>
-                                <input type="number" id="twb-delay"
-                                    value="${CONFIG.DELAY_ENTRE_ENVIOS}"
-                                    min="200" max="5000" step="100"
-                                    style="width: 80px; background: ${CORES.fundo}; border: 1px solid ${CORES.borda};
-                                        color: ${CORES.texto}; border-radius: 4px; padding: 4px; text-align: center;">
+
+                            <label style="display:flex;align-items:center;gap:8px;font-size:12px;">
+                                <span>⏱️ Delay entre envios:</span>
+                                <input type="number" id="twb-delay" value="${CONFIG.DELAY_ENTRE_ENVIOS}" min="200" max="5000" step="100"
+                                    style="width:80px;background:${CORES.fundo};border:1px solid ${CORES.borda};color:${CORES.texto};border-radius:4px;padding:4px;text-align:center;">
+                                <span>ms</span>
                             </label>
-                            <div style="margin-top: 12px;">
-                                <div style="font-size: 11px; color: ${CORES.textoDim}; margin-bottom: 6px;">🎯 Prioridade de recursos (arraste para reordenar):</div>
-                                <div id="twb-prioridade-list" style="display: flex; flex-direction: column; gap: 4px;">
+
+                            <label style="display:flex;align-items:center;gap:8px;font-size:12px;">
+                                <span>🏠 Armazém padrão externo:</span>
+                                <input type="number" id="twb-armazem-padrao" value="${CONFIG.ARMAZEM_PADRAO_EXTERNO}" min="1000" max="400000" step="1000"
+                                    style="width:90px;background:${CORES.fundo};border:1px solid ${CORES.borda};color:${CORES.texto};border-radius:4px;padding:4px;text-align:center;">
+                            </label>
+
+                            <div>
+                                <div style="font-size:11px;color:${CORES.textoDim};margin-bottom:6px;">🎯 Prioridade de recursos (arraste):</div>
+                                <div id="twb-prioridade-list" style="display:flex;flex-direction:column;gap:4px;">
                                     ${(function() {
                                         const INFO = {
                                             madeira: { icon: '🌲', label: 'Madeira', cor: CORES.madeira },
@@ -523,349 +558,321 @@
                 </div>
             </div>
 
-            <!-- RESULTADOS -->
-            <div style="background: ${CORES.fundoCard}; border-radius: 12px; border: 1px solid ${CORES.borda}; overflow: hidden; margin-top: 20px;">
-                <div style="padding: 12px 16px; background: ${CORES.fundo}; border-bottom: 1px solid ${CORES.borda};">
-                    <h3 style="margin: 0; color: ${CORES.verde};">📊 Resultado dos Envios</h3>
+            <!-- RESULTADO -->
+            <div style="background:${CORES.fundoCard};border-radius:12px;border:1px solid ${CORES.borda};overflow:hidden;margin-top:4px;">
+                <div style="padding:12px 16px;background:${CORES.fundo};border-bottom:1px solid ${CORES.borda};">
+                    <h3 style="margin:0;color:${CORES.verde};">📊 Resultado dos Envios</h3>
                 </div>
-                <div style="padding: 12px;">
-                    <div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
+                <div style="padding:12px;">
+                    <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
                         <button id="twb-calcular" class="twb-btn twb-btn-warning" disabled>📊 CALCULAR ENVIOS</button>
-                        <button id="twb-executar" class="twb-btn twb-btn-danger" disabled>🚀 EXECUTAR ENVIOS</button>
-                        <span id="twb-status" style="color: ${CORES.textoDim}; font-size: 11px; align-self: center;"></span>
+                        <button id="twb-executar" class="twb-btn twb-btn-danger"  disabled>🚀 EXECUTAR ENVIOS</button>
                     </div>
-                    <div id="twb-resultado" style="
-                        background: ${CORES.fundo}; border-radius: 8px; padding: 12px;
-                        font-size: 12px; max-height: 300px; overflow-y: auto;
-                        font-family: monospace;
-                    "></div>
+                    <div id="twb-resultado" style="background:${CORES.fundo};border-radius:8px;padding:12px;font-size:12px;max-height:300px;overflow-y:auto;font-family:monospace;"></div>
                 </div>
             </div>
         `, '📝 Log de Atividades');
 
-        let aldeias = [];
-        let destinosConsultados = [];
-        let enviosCalculados = [];
+        // Estado local
+        let minhasAldeias       = [];
+        let destinosResolvidos  = [];
+        let enviosCalculados    = [];
 
-        // Carregar aldeias
+        // ---- CARREGAR ALDEIAS ----
         document.getElementById('twb-btn-load').addEventListener('click', async () => {
             ui.btnLoading('twb-btn-load', '⏳ CARREGANDO...');
 
-            aldeias = await extrairAldeias(ui);
+            // Carregar mapa público e minhas aldeias em paralelo
+            const [_, aldeias] = await Promise.all([
+                carregarMapaPublico(ui),
+                extrairMinhasAldeias(ui)
+            ]);
+            minhasAldeias = aldeias;
 
-            if (aldeias.length > 0) {
+            if (minhasAldeias.length > 0) {
                 const listDiv = document.getElementById('twb-origens-list');
-                listDiv.innerHTML = `
-                    <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer;">
-                        <input type="checkbox" id="twb-select-all" checked>
-                        <strong>Selecionar Todas (${aldeias.length} aldeias)</strong>
-                    </label>
-                    ${aldeias.map((a) => `
-                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 6px; border-bottom: 1px solid ${CORES.borda}44; cursor: pointer;">
-                            <input type="checkbox" class="twb-origem" value="${a.id}" data-coord="${a.coord}" checked>
-                            <div style="flex:1;">
-                                <div>
-                                    <strong>${a.nome}</strong>
-                                    <span style="color: ${CORES.textoDim};">(${a.coord})</span>
-                                    <span style="color: ${CORES.info}; margin-left: 8px;">🚚${a.comerciantesDisp}</span>
-                                </div>
-                                <div style="font-size: 10px; margin-top: 4px;">
-                                    🌲 ${a.madeira.toLocaleString()}
-                                    🧱 ${a.argila.toLocaleString()}
-                                    ⚙️ ${a.ferro.toLocaleString()}
-                                    <span style="color: ${CORES.textoDim}; margin-left: 8px;">📦 ${a.armazem.toLocaleString()}</span>
-                                </div>
-                            </div>
-                        </label>
-                    `).join('')}
-                `;
+                listDiv.innerHTML =
+                    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer;">'
+                    + '<input type="checkbox" id="twb-select-all" checked>'
+                    + '<strong>Selecionar Todas (' + minhasAldeias.length + ' aldeias)</strong>'
+                    + '</label>'
+                    + minhasAldeias.map(function(a) {
+                        return '<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:6px;border-bottom:1px solid ' + CORES.borda + '44;cursor:pointer;">'
+                            + '<input type="checkbox" class="twb-origem" value="' + a.id + '" data-coord="' + a.coord + '" checked>'
+                            + '<div style="flex:1;">'
+                            + '<div><strong>' + a.nome + '</strong> <span style="color:' + CORES.textoDim + ';">(' + a.coord + ')</span>'
+                            + ' <span style="color:' + CORES.info + ';margin-left:8px;">🚚' + a.comerciantesDisp + '</span></div>'
+                            + '<div style="font-size:10px;margin-top:4px;">🌲 ' + a.madeira.toLocaleString() + ' 🧱 ' + a.argila.toLocaleString() + ' ⚙️ ' + a.ferro.toLocaleString() + ' <span style="color:' + CORES.textoDim + ';margin-left:8px;">📦 ' + a.armazem.toLocaleString() + '</span></div>'
+                            + '</div></label>';
+                    }).join('');
 
-                document.getElementById('twb-select-all').addEventListener('change', (e) => {
-                    document.querySelectorAll('.twb-origem').forEach(cb => cb.checked = e.target.checked);
+                document.getElementById('twb-select-all').addEventListener('change', function(e) {
+                    document.querySelectorAll('.twb-origem').forEach(function(cb) { cb.checked = e.target.checked; });
                 });
-
-                ui.log(`✅ ${aldeias.length} aldeias carregadas`, 'success');
-
-                // FIX #7: só habilitar calcular após aldeias E destinos estarem prontos
-                // (botão calcular permanece disabled; será habilitado após consulta de destinos)
             }
 
             ui.btnRestore('twb-btn-load', '📡 CARREGAR ALDEIAS');
         });
 
-        // Consultar destinos
+        // ---- CONSULTAR DESTINOS ----
         document.getElementById('twb-consultar').addEventListener('click', async () => {
+            if (minhasAldeias.length === 0) {
+                ui.log('⚠️ Carregue suas aldeias primeiro', 'warning');
+                return;
+            }
+
+            // Garantir mapa carregado
+            const mapaOk = await carregarMapaPublico(ui);
+            if (!mapaOk) {
+                ui.log('❌ Não foi possível carregar o mapa público', 'error');
+                return;
+            }
+
             const texto = document.getElementById('twb-destinos-text').value;
-            const coords = texto.split(/[\s\n,]+/).filter(c => c.match(/\d+\|\d+/));
-            const armazemManual = parseInt(document.getElementById('twb-armazem-manual').value) || null;
+            const coords = texto.split(/[\s\n,;]+/).map(function(c) { return c.trim(); }).filter(function(c) { return /^\d+\|\d+$/.test(c); });
 
             if (coords.length === 0) {
-                ui.log('⚠️ Informe pelo menos uma coordenada', 'warning');
+                ui.log('⚠️ Informe pelo menos uma coordenada no formato 123|456', 'warning');
                 return;
             }
 
-            // FIX #7: verificar se aldeias foram carregadas
-            if (aldeias.length === 0) {
-                ui.log('⚠️ Carregue as aldeias de origem antes de consultar destinos', 'warning');
-                return;
-            }
+            const armazemManual = parseInt(document.getElementById('twb-armazem-manual').value) || 0;
 
-            ui.log(`🔍 Consultando ${coords.length} destino(s)...`, 'info');
             ui.btnLoading('twb-consultar', '⏳ CONSULTANDO...');
+            ui.log('🔍 Resolvendo ' + coords.length + ' destino(s)...', 'info');
 
-            destinosConsultados = [];
-            for (const coord of coords) {
-                let info = await consultarDestino(coord, aldeias);
-                if (!info.encontrado && armazemManual > 0) {
-                    // FIX #2: id permanece null para destinos com armazém manual;
-                    // calcularDistribuicao vai alertar e pular esses destinos
-                    info = { coord, id: null, armazem: armazemManual, madeira: 0, argila: 0, ferro: 0, encontrado: true };
-                }
-                destinosConsultados.push(info);
-                await new Promise(r => setTimeout(r, 150));
-            }
+            destinosResolvidos = coords.map(function(coord) {
+                return resolverDestino(coord, minhasAldeias, armazemManual);
+            });
 
+            // Renderizar resultado
             const infoDiv = document.getElementById('twb-destinos-info');
-            const meta = CONFIG.PERCENTUAL_ARMAZEM_DESTINO;
-            infoDiv.innerHTML = destinosConsultados.map(d => {
-                if (d.encontrado) {
-                    const alvo = Math.floor(d.armazem * meta / 100);
-                    const faltaMadeira = Math.max(0, alvo - d.madeira);
-                    const faltaArgila = Math.max(0, alvo - d.argila);
-                    const faltaFerro = Math.max(0, alvo - d.ferro);
-                    const fonte = aldeias.find(a => a.coord === d.coord) ? '🏠 sua' : '👤 outro';
-                    // FIX #2: aviso visual quando id não foi encontrado
-                    const semId = !d.id ? `<br><span style="color:${CORES.aviso};">⚠️ ID não encontrado — envio manual não disponível</span>` : '';
-                    return `
-                        <div style="padding: 8px; border-bottom: 1px solid ${CORES.borda}44;">
-                            <strong>✅ ${d.coord}</strong> <span style="color: ${CORES.textoDim};">${fonte}</span>${semId}<br>
-                            📦 Armazém: ${d.armazem.toLocaleString()} (${meta}% = ${alvo.toLocaleString()} de cada)<br>
-                            🌲 ${d.madeira.toLocaleString()} → +${faltaMadeira.toLocaleString()}<br>
-                            🧱 ${d.argila.toLocaleString()} → +${faltaArgila.toLocaleString()}<br>
-                            ⚙️ ${d.ferro.toLocaleString()} → +${faltaFerro.toLocaleString()}
-                        </div>
-                    `;
+            const perc    = CONFIG.PERCENTUAL_ARMAZEM_DESTINO;
+            infoDiv.innerHTML = destinosResolvidos.map(function(d) {
+                if (!d.encontrado) {
+                    return '<div style="padding:6px;color:' + CORES.erro + ';">❌ ' + d.coord + ' — ' + (d.motivo || 'não encontrado') + '</div>';
                 }
-                return `<div style="padding: 8px; color: ${CORES.erro};">⚠️ ${d.coord} - Não encontrado</div>`;
+                const meta   = Math.floor(d.armazem * perc / 100);
+                const tag    = d.proprio ? '🏠 sua' : '👤 ' + d.jogador;
+                const aviso  = d.armazemEstimado ? ' <span style="color:' + CORES.aviso + ';">(armazém estimado)</span>' : '';
+                return '<div style="padding:8px;border-bottom:1px solid ' + CORES.borda + '44;">'
+                    + '<strong style="color:' + CORES.verde + ';">✅ ' + d.coord + '</strong>'
+                    + ' <span style="color:' + CORES.textoDim + ';">' + tag + '</span>'
+                    + ' <span style="color:' + CORES.textoDim + ';">' + d.nome + '</span>'
+                    + aviso + '<br>'
+                    + '📦 ' + d.armazem.toLocaleString() + ' → alvo ' + perc + '% = ' + meta.toLocaleString() + ' cada<br>'
+                    + (d.proprio
+                        ? '🌲 ' + d.madeira.toLocaleString() + ' 🧱 ' + d.argila.toLocaleString() + ' ⚙️ ' + d.ferro.toLocaleString()
+                        : '<span style="color:' + CORES.textoDim + ';">recursos atuais desconhecidos — enviará até o armazém</span>')
+                    + '</div>';
             }).join('');
 
-            // FIX #7: habilitar calcular somente agora que destinos foram consultados
-            const destinosViaveis = destinosConsultados.filter(d => d.encontrado && d.armazem > 0 && d.id);
-            if (destinosViaveis.length > 0 && aldeias.length > 0) {
+            const validos = destinosResolvidos.filter(function(d) { return d.encontrado; });
+            if (validos.length > 0) {
                 document.getElementById('twb-calcular').disabled = false;
+                ui.log('✅ ' + validos.length + ' de ' + coords.length + ' destinos resolvidos', 'success');
+            } else {
+                ui.log('❌ Nenhum destino válido encontrado', 'error');
             }
 
             ui.btnRestore('twb-consultar', '🔍 CONSULTAR DESTINOS');
-            ui.log('✅ Consulta concluída', 'success');
         });
 
-        // Configurações
-        // FIX #13: validar limites nas configurações
-        document.getElementById('twb-percentual').addEventListener('change', (e) => {
-            const val = parseInt(e.target.value) || 80;
-            CONFIG.PERCENTUAL_ARMAZEM_DESTINO = Math.max(10, Math.min(100, val));
+        // ---- CONFIGS ----
+        document.getElementById('twb-percentual').addEventListener('change', function(e) {
+            CONFIG.PERCENTUAL_ARMAZEM_DESTINO = Math.max(10, Math.min(100, parseInt(e.target.value) || 80));
             e.target.value = CONFIG.PERCENTUAL_ARMAZEM_DESTINO;
             saveConfig();
-            ui.log(`📦 Percentual ajustado para ${CONFIG.PERCENTUAL_ARMAZEM_DESTINO}%`, 'info');
         });
 
-        document.getElementById('twb-delay').addEventListener('change', (e) => {
-            const val = parseInt(e.target.value) || 800;
-            CONFIG.DELAY_ENTRE_ENVIOS = Math.max(200, Math.min(5000, val));
+        document.getElementById('twb-delay').addEventListener('change', function(e) {
+            CONFIG.DELAY_ENTRE_ENVIOS = Math.max(200, Math.min(5000, parseInt(e.target.value) || 800));
             e.target.value = CONFIG.DELAY_ENTRE_ENVIOS;
             saveConfig();
         });
 
-        // Drag-and-drop de prioridade de recursos
+        document.getElementById('twb-armazem-padrao').addEventListener('change', function(e) {
+            CONFIG.ARMAZEM_PADRAO_EXTERNO = Math.max(1000, parseInt(e.target.value) || 30000);
+            e.target.value = CONFIG.ARMAZEM_PADRAO_EXTERNO;
+            saveConfig();
+        });
+
+        // ---- DRAG-AND-DROP PRIORIDADE ----
         (function() {
             const list = document.getElementById('twb-prioridade-list');
             if (!list) return;
             let dragging = null;
 
-            list.addEventListener('dragstart', (e) => {
+            list.addEventListener('dragstart', function(e) {
                 dragging = e.target.closest('[draggable]');
                 if (dragging) dragging.style.opacity = '0.4';
             });
-            list.addEventListener('dragend', () => {
+            list.addEventListener('dragend', function() {
                 if (dragging) dragging.style.opacity = '1';
                 dragging = null;
-                // Atualizar CONFIG e salvar
                 const itens = list.querySelectorAll('[data-recurso]');
-                CONFIG.PRIORIDADE_RECURSOS = Array.from(itens).map(el => el.dataset.recurso);
-                // Atualizar números de ordem
-                itens.forEach((el, i) => {
+                CONFIG.PRIORIDADE_RECURSOS = Array.from(itens).map(function(el) { return el.dataset.recurso; });
+                itens.forEach(function(el, i) {
                     const num = el.querySelector('span:first-child');
-                    if (num) num.textContent = `${i + 1}º`;
+                    if (num) num.textContent = (i + 1) + 'º';
                 });
                 saveConfig();
-                ui.log(`🎯 Prioridade: ${CONFIG.PRIORIDADE_RECURSOS.join(' → ')}`, 'info');
+                ui.log('🎯 Prioridade: ' + CONFIG.PRIORIDADE_RECURSOS.join(' → '), 'info');
             });
-            list.addEventListener('dragover', (e) => {
+            list.addEventListener('dragover', function(e) {
                 e.preventDefault();
                 const target = e.target.closest('[draggable]');
                 if (target && target !== dragging) {
-                    const rect = target.getBoundingClientRect();
+                    const rect  = target.getBoundingClientRect();
                     const after = e.clientY > rect.top + rect.height / 2;
                     list.insertBefore(dragging, after ? target.nextSibling : target);
                 }
             });
         })();
 
-        // Calcular envios (COM VALIDAÇÃO)
-        document.getElementById('twb-calcular').addEventListener('click', () => {
+        // ---- CALCULAR ----
+        document.getElementById('twb-calcular').addEventListener('click', function() {
             const checkboxes = document.querySelectorAll('.twb-origem:checked');
             if (checkboxes.length === 0) {
-                ui.log('⚠️ Selecione pelo menos uma origem', 'warning');
+                ui.log('⚠️ Selecione pelo menos uma aldeia de origem', 'warning');
                 return;
             }
 
-            const destinosViaveis = destinosConsultados.filter(d => d.encontrado && d.armazem > 0);
-            if (destinosViaveis.length === 0) {
-                ui.log('⚠️ Nenhum destino válido. Consulte os destinos primeiro.', 'warning');
+            const destinosValidos = destinosResolvidos.filter(function(d) { return d.encontrado; });
+            if (destinosValidos.length === 0) {
+                ui.log('⚠️ Nenhum destino válido', 'warning');
                 return;
             }
 
-            let origensSelecionadas = [];
-            for (const cb of checkboxes) {
-                const aldeia = aldeias.find(a => a.id == cb.value);
-                if (aldeia) origensSelecionadas.push({ ...aldeia });
-            }
+            let origens = [];
+            checkboxes.forEach(function(cb) {
+                const a = minhasAldeias.find(function(x) { return x.id == cb.value; });
+                if (a) origens.push(Object.assign({}, a));
+            });
 
-            // ========== VALIDAÇÃO: remover origens que são destinos ==========
-            const destinosCoords = destinosViaveis.map(d => d.coord);
-            const origensRemovidas = [];
-            const origensValidas = origensSelecionadas.filter(origem => {
-                if (destinosCoords.includes(origem.coord)) {
-                    origensRemovidas.push(origem.coord);
-                    return false;
-                }
+            // Remover origens que são destinos
+            const destCoords = destinosValidos.map(function(d) { return d.coord; });
+            const removidas  = [];
+            origens = origens.filter(function(o) {
+                if (destCoords.indexOf(o.coord) >= 0) { removidas.push(o.coord); return false; }
                 return true;
             });
 
-            if (origensRemovidas.length > 0) {
-                ui.log(`⚠️ ${origensRemovidas.length} aldeia(s) removidas por serem também destinos: ${origensRemovidas.join(', ')}`, 'warning');
-
-                for (const coord of origensRemovidas) {
-                    const checkbox = document.querySelector(`.twb-origem[data-coord="${coord}"]`);
-                    if (checkbox) {
-                        checkbox.checked = false;
-                        const label = checkbox.closest('label');
-                        if (label) {
-                            label.style.opacity = '0.5';
-                            setTimeout(() => { label.style.opacity = '1'; }, 2000);
-                        }
-                    }
-                }
+            if (removidas.length > 0) {
+                ui.log('⚠️ Removidas origens que são destinos: ' + removidas.join(', '), 'warning');
+                removidas.forEach(function(coord) {
+                    const cb = document.querySelector('.twb-origem[data-coord="' + coord + '"]');
+                    if (cb) { cb.checked = false; }
+                });
             }
 
-            if (origensValidas.length === 0) {
-                ui.log('❌ Todas as origens selecionadas são também destinos. Nada para enviar.', 'error');
+            if (origens.length === 0) {
+                ui.log('❌ Nenhuma origem válida restante', 'error');
                 return;
             }
-            // ========== FIM DA VALIDAÇÃO ==========
 
-            ui.log(`📊 Calculando envios de ${origensValidas.length} origens para ${destinosViaveis.length} destinos...`, 'info');
-            enviosCalculados = calcularDistribuicao(origensValidas, destinosViaveis, ui);
+            ui.log('📊 Calculando: ' + origens.length + ' origens → ' + destinosValidos.length + ' destinos...', 'info');
+            enviosCalculados = calcularDistribuicao(origens, destinosValidos, ui);
 
             const resultDiv = document.getElementById('twb-resultado');
             if (enviosCalculados.length === 0) {
-                resultDiv.innerHTML = '<span style="color: #f85149;">❌ Nenhum envio possível</span>';
+                resultDiv.innerHTML = '<span style="color:' + CORES.erro + ';">❌ Nenhum envio possível com os recursos e mercadores disponíveis</span>';
                 document.getElementById('twb-executar').disabled = true;
             } else {
-                const totalMadeira = enviosCalculados.reduce((s, e) => s + e.madeira, 0);
-                const totalArgila = enviosCalculados.reduce((s, e) => s + e.argila, 0);
-                const totalFerro = enviosCalculados.reduce((s, e) => s + e.ferro, 0);
-                const totalMercs = enviosCalculados.reduce((s, e) => s + e.mercadores, 0);
+                const totMad  = enviosCalculados.reduce(function(s, e) { return s + e.madeira; }, 0);
+                const totArg  = enviosCalculados.reduce(function(s, e) { return s + e.argila;  }, 0);
+                const totFer  = enviosCalculados.reduce(function(s, e) { return s + e.ferro;   }, 0);
+                const totMerc = enviosCalculados.reduce(function(s, e) { return s + e.mercadores; }, 0);
 
-                resultDiv.innerHTML = `
-                    <div style="color: ${CORES.verde}; margin-bottom: 12px;">✅ ${enviosCalculados.length} envios planejados</div>
-                    <div style="display: flex; gap: 20px; margin-bottom: 16px; flex-wrap: wrap;">
-                        <div style="color: ${CORES.madeira};">🌲 Madeira: ${totalMadeira.toLocaleString()}</div>
-                        <div style="color: ${CORES.argila};">🧱 Argila: ${totalArgila.toLocaleString()}</div>
-                        <div style="color: ${CORES.ferro};">⚙️ Ferro: ${totalFerro.toLocaleString()}</div>
-                        <div>📦 Total: ${(totalMadeira+totalArgila+totalFerro).toLocaleString()}</div>
-                        <div>🚚 Mercadores: ${totalMercs}</div>
-                    </div>
-                    <hr style="border-color: ${CORES.borda}; margin: 12px 0;">
-                    <div style="font-size: 11px;">
-                        ${enviosCalculados.map(e => `
-                            <div style="padding: 8px 0; border-bottom: 1px solid ${CORES.borda}44;">
-                                <strong>📤 ${e.origemCoord} → 📍 ${e.destinoCoord}</strong><br>
-                                🌲 ${e.madeira.toLocaleString()} 🧱 ${e.argila.toLocaleString()} ⚙️ ${e.ferro.toLocaleString()} | 🚚 ${e.mercadores} mercs
-                            </div>
-                        `).join('')}
-                    </div>
-                `;
+                resultDiv.innerHTML =
+                    '<div style="color:' + CORES.verde + ';margin-bottom:12px;">✅ ' + enviosCalculados.length + ' envios planejados</div>'
+                    + '<div style="display:flex;gap:20px;margin-bottom:16px;flex-wrap:wrap;">'
+                    + '<div style="color:' + CORES.madeira + ';">🌲 ' + totMad.toLocaleString() + '</div>'
+                    + '<div style="color:' + CORES.argila  + ';">🧱 ' + totArg.toLocaleString() + '</div>'
+                    + '<div style="color:' + CORES.ferro   + ';">⚙️ ' + totFer.toLocaleString() + '</div>'
+                    + '<div>📦 Total: ' + (totMad + totArg + totFer).toLocaleString() + '</div>'
+                    + '<div>🚚 Mercadores: ' + totMerc + '</div>'
+                    + '</div>'
+                    + '<hr style="border-color:' + CORES.borda + ';margin:12px 0;">'
+                    + '<div style="font-size:11px;">'
+                    + enviosCalculados.map(function(e) {
+                        const tagDest = e.destinoProprio ? '🏠' : '👤';
+                        return '<div style="padding:8px 0;border-bottom:1px solid ' + CORES.borda + '44;">'
+                            + '<strong>📤 ' + e.origemCoord + ' → ' + tagDest + ' ' + e.destinoCoord + '</strong>'
+                            + ' <span style="color:' + CORES.textoDim + ';">(' + e.destinoJogador + ')</span><br>'
+                            + '🌲 ' + e.madeira.toLocaleString()
+                            + ' 🧱 ' + e.argila.toLocaleString()
+                            + ' ⚙️ ' + e.ferro.toLocaleString()
+                            + ' | 🚚 ' + e.mercadores + ' mercs'
+                            + '</div>';
+                    }).join('')
+                    + '</div>';
+
                 document.getElementById('twb-executar').disabled = false;
-                ui.log(`✅ ${enviosCalculados.length} envios calculados`, 'success');
+                ui.log('✅ ' + enviosCalculados.length + ' envios calculados', 'success');
             }
         });
 
-        // Executar envios
+        // ---- EXECUTAR ----
         document.getElementById('twb-executar').addEventListener('click', async () => {
             if (enviosCalculados.length === 0) {
                 ui.log('⚠️ Calcule os envios primeiro', 'warning');
                 return;
             }
 
-            const total = enviosCalculados.reduce((s, e) => s + e.total, 0);
-            if (!confirm(`Executar ${enviosCalculados.length} envios?\n📦 Total: ${total.toLocaleString()} recursos`)) {
-                ui.log('❌ Cancelado', 'warning');
+            const total = enviosCalculados.reduce(function(s, e) { return s + e.total; }, 0);
+            if (!confirm('Executar ' + enviosCalculados.length + ' envios?\n📦 Total: ' + total.toLocaleString() + ' recursos')) {
+                ui.log('❌ Cancelado pelo usuário', 'warning');
                 return;
             }
 
-            // Usar btnLoading/btnRestore do tw-ui-kit
             ui.btnLoading('twb-executar', '⏳ ENVIANDO...');
             ui.btnLoading('twb-calcular', '⏳ Aguarde…');
-
-            // Iniciar barra de progresso nativa do tw-ui-kit
-            ui.setProgress(0, `0 / ${enviosCalculados.length} envios`);
+            ui.setProgress(0, '0 / ' + enviosCalculados.length + ' envios');
 
             let sucessos = 0;
             for (let i = 0; i < enviosCalculados.length; i++) {
-                const envio = enviosCalculados[i];
-                ui.log(`[${i+1}/${enviosCalculados.length}] ${envio.origemCoord} → ${envio.destinoCoord}`, 'info');
+                const e = enviosCalculados[i];
+                const tagDest = e.destinoProprio ? '🏠' : '👤';
+                ui.log('[' + (i + 1) + '/' + enviosCalculados.length + '] ' + e.origemCoord + ' → ' + tagDest + ' ' + e.destinoCoord + ' (' + e.destinoJogador + ')', 'info');
 
                 const pct = ((i + 1) / enviosCalculados.length) * 100;
-                ui.setProgress(pct, `${i + 1} / ${enviosCalculados.length} — ${sucessos} ✅`);
+                ui.setProgress(pct, (i + 1) + ' / ' + enviosCalculados.length + ' — ' + sucessos + ' ✅');
 
-                const resultado = await enviarRecursos(envio.origemId, envio.destinoId, envio.madeira, envio.argila, envio.ferro, ui);
-                if (resultado) sucessos++;
+                const ok = await enviarRecursos(e.origemId, e.destinoId, e.madeira, e.argila, e.ferro, ui);
+                if (ok) sucessos++;
 
                 if (i < enviosCalculados.length - 1) {
-                    await new Promise(r => setTimeout(r, CONFIG.DELAY_ENTRE_ENVIOS));
+                    await new Promise(function(r) { setTimeout(r, CONFIG.DELAY_ENTRE_ENVIOS); });
                 }
             }
 
-            // Mostrar resultado final na barra e esconder após 4s
-            const labelFinal = `✅ ${sucessos} / ${enviosCalculados.length} enviados`;
-            ui.setProgress(100, labelFinal);
-            ui.log(`✅ Finalizado: ${sucessos}/${enviosCalculados.length} sucessos`, sucessos > 0 ? 'success' : 'error');
+            ui.setProgress(100, '✅ ' + sucessos + ' / ' + enviosCalculados.length + ' enviados');
+            ui.log('✅ Finalizado: ' + sucessos + '/' + enviosCalculados.length + ' sucessos', sucessos > 0 ? 'success' : 'error');
             ui.hideProgress(4000);
 
-            // Restaurar botões via tw-ui-kit
             ui.btnRestore('twb-executar', '🚀 EXECUTAR ENVIOS');
             ui.btnRestore('twb-calcular', '📊 CALCULAR ENVIOS');
         });
 
-        document.getElementById('twb-close-btn').addEventListener('click', () => window.close());
-        ui.log('📤 Envio Multi-Aldeias v4.4 - Com validação origem/destino e correções!', 'success');
-        ui.log('💡 Se uma origem também for destino, ela é automaticamente removida', 'info');
+        document.getElementById('twb-close-btn').addEventListener('click', function() { window.close(); });
+
+        ui.log('📤 Envio Multi-Aldeias v5.0 — suporte a aldeias externas via mapa público', 'success');
+        ui.log('💡 Dica: informe o armazém real dos destinos externos para maior precisão', 'info');
     }
 
-    // Botão flutuante
+    // ==================== BOTÃO FLUTUANTE ====================
     function adicionarBotao() {
         if (document.getElementById('twb-multi-float')) return;
         const btn = document.createElement('div');
         btn.id = 'twb-multi-float';
-        btn.innerHTML = '📤 Envio v4';
-        btn.style.cssText = `
-            position: fixed; bottom: 20px; right: 20px; z-index: 999999;
-            padding: 10px 16px; background: #0d1117; color: #00d97e;
-            border: 1px solid #00d97e55; border-radius: 8px; cursor: pointer;
-            font-family: monospace; font-weight: bold; font-size: 12px;
-        `;
-        btn.onclick = () => {
+        btn.innerHTML = '📤 Envio v5';
+        btn.style.cssText =
+            'position:fixed;bottom:20px;right:20px;z-index:999999;'
+            + 'padding:10px 16px;background:#0d1117;color:#00d97e;'
+            + 'border:1px solid #00d97e55;border-radius:8px;cursor:pointer;'
+            + 'font-family:monospace;font-weight:bold;font-size:12px;';
+        btn.onclick = function() {
             const url = window.location.href.split('?')[0] + '?' + DASHBOARD_PARAM;
             window.open(url, 'TWMultiSend');
         };
@@ -877,4 +884,5 @@
     } else {
         adicionarBotao();
     }
+
 })();
